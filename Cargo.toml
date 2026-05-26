@@ -1,0 +1,18 @@
+[package]
+name = "biturbo"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[lib]
+name = "biturbo"
+crate-type = ["cdylib"]
+
+[dependencies]
+libz-sys = { version = "1.1", default-features = true }
+markdown = { version = "=1.0.0", default-features = true }
+libloading = "0.8"
+toml = "1.1.2"
+serde = { version = "1.0", features = ["derive"] }
+git2 = { version = "0.21.0", features = ["vendored-libgit2"] }
+

@@ -1,0 +1,447 @@
+use crate::ffi::error::set_last_error_str;
+use crate::ffi::types::{BtBuf, BtReferences, BtOid};
+use crate::ffi::winheap::{heap_alloc, heap_free};
+use std::collections::BTreeMap;
+use std::ffi::CStr;
+use std::os::raw::{c_char, c_int};
+use std::path::{Path, PathBuf};
+
+struct NativeRefEntry {
+    name: String,
+    symref: String,
+    has_oid: bool,
+    oid: BtOid,
+    has_peeled_oid: bool,
+    peeled_oid: BtOid,
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn bt_get_references(
+    git_dir_path: *const c_char,
+    include_tags: u8,
+    out_refs: *mut BtReferences,
+) -> c_int {
+    if git_dir_path.is_null() || out_refs.is_null() {
+        set_last_error_str("invalid input");
+        return 1;
+    }
+
+    // Initialize output
+    unsafe {
+        (*out_refs).a = BtBuf { ptr: core::ptr::null_mut(), len: 0, cap: 0 };
+        (*out_refs).b = BtBuf { ptr: core::ptr::null_mut(), len: 0, cap: 0 };
+        (*out_refs).c = BtBuf { ptr: core::ptr::null_mut(), len: 0, cap: 0 };
+        (*out_refs).d = BtBuf { ptr: core::ptr::null_mut(), len: 0, cap: 0 };
+        (*out_refs).e = BtBuf { ptr: core::ptr::null_mut(), len: 0, cap: 0 };
+        (*out_refs).hash = 0;
+    }
+
+    let git_dir_bytes = unsafe { CStr::from_ptr(git_dir_path) }.to_bytes();
+    let git_dir_str = match std::str::from_utf8(git_dir_bytes) {
+        Ok(s) => s,
+        Err(_) => {
+            set_last_error_str("non-utf8 git_dir_path");
+            return 1;
+        }
+    };
+    let git_dir = PathBuf::from(git_dir_str);
+    let repo = match git2::Repository::open(&git_dir) {
+        Ok(r) => r,
+        Err(e) => {
+            set_last_error_str(&format!("failed to open repository: {e}"));
+            return 1;
+        }
+    };
+
+    let mut refs = BTreeMap::new();
+
+    // 1. Read packed references
+    collect_packed_refs(&git_dir, &mut refs);
+
+    // 2. Read loose references
+    collect_loose_refs(&git_dir, "refs", &mut refs);
+
+    // 3. Special ref: HEAD
+    let head_path = git_dir.join("HEAD");
+    if head_path.exists() {
+        if let Ok(content_bytes) = std::fs::read(&head_path) {
+            let head = String::from_utf8_lossy(&content_bytes).trim().to_string();
+            if !head.is_empty() {
+                let mut head_entry = NativeRefEntry {
+                    name: "HEAD".to_string(),
+                    symref: String::new(),
+                    has_oid: false,
+                    oid: BtOid { s0: 0, s1: 0, s2: 0, s3: 0, s4: 0 },
+                    has_peeled_oid: false,
+                    peeled_oid: BtOid { s0: 0, s1: 0, s2: 0, s3: 0, s4: 0 },
+                };
+                if head.starts_with("ref: ") {
+                    head_entry.symref = head[5..].trim().to_string();
+                } else {
+                    if let Some(parsed) = parse_hex_oid(&head) {
+                        head_entry.oid = parsed;
+                        head_entry.has_oid = true;
+                    }
+                }
+                if head_entry.has_oid || !head_entry.symref.is_empty() {
+                    add_or_update_ref(&mut refs, head_entry);
+                }
+            }
+        }
+    }
+
+    // Collect special heads
+    let special_heads = [
+        "ORIG_HEAD",
+        "FETCH_HEAD",
+        "MERGE_HEAD",
+        "CHERRY_PICK_HEAD",
+        "REVERT_HEAD",
+        "BISECT_HEAD",
+    ];
+    for &sh in &special_heads {
+        let path = git_dir.join(sh);
+        if path.exists() {
+            if let Ok(content_bytes) = std::fs::read(&path) {
+                let text = String::from_utf8_lossy(&content_bytes).trim().to_string();
+                if !text.is_empty() {
+                    let mut entry = NativeRefEntry {
+                        name: sh.to_string(),
+                        symref: String::new(),
+                        has_oid: false,
+                        oid: BtOid { s0: 0, s1: 0, s2: 0, s3: 0, s4: 0 },
+                        has_peeled_oid: false,
+                        peeled_oid: BtOid { s0: 0, s1: 0, s2: 0, s3: 0, s4: 0 },
+                    };
+                    if text.starts_with("ref: ") {
+                        entry.symref = text[5..].trim().to_string();
+                    } else {
+                        if let Some(parsed) = parse_hex_oid(&text) {
+                            entry.oid = parsed;
+                            entry.has_oid = true;
+                        }
+                    }
+                    if entry.has_oid || !entry.symref.is_empty() {
+                        add_or_update_ref(&mut refs, entry);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut names_data = String::new();
+    let mut name_offsets = Vec::new();
+    let mut oids = Vec::new();
+    let mut symrefs_data = String::new();
+    let mut symref_offsets = Vec::new();
+
+    let skip_tags = include_tags != 0;
+
+    for (_, entry) in &refs {
+        let ref_name = &entry.name;
+        if ref_name == "FETCH_HEAD" || ref_name == "MERGE_HEAD" {
+            continue;
+        }
+        if !entry.symref.is_empty() {
+            symrefs_data.push_str(ref_name);
+            symref_offsets.push(symrefs_data.len() as i64);
+            symrefs_data.push_str(&entry.symref);
+            symref_offsets.push(symrefs_data.len() as i64);
+            continue;
+        }
+        if skip_tags && ref_name.starts_with("refs/tags/") {
+            continue;
+        }
+        if !entry.has_oid {
+            continue;
+        }
+        let mut oid = entry.oid;
+        if ref_name.starts_with("refs/tags/") {
+            if entry.has_peeled_oid {
+                oid = entry.peeled_oid;
+            } else {
+                oid = peel_tag_object(&repo, entry.oid);
+            }
+        }
+        names_data.push_str(ref_name);
+        name_offsets.push(names_data.len() as i64);
+        oids.push(oid);
+    }
+
+    if !assign_bytes(unsafe { &mut (*out_refs).a }, &names_data) ||
+       !assign_vector(unsafe { &mut (*out_refs).b }, &name_offsets) ||
+       !assign_vector(unsafe { &mut (*out_refs).c }, &oids) ||
+       !assign_bytes(unsafe { &mut (*out_refs).d }, &symrefs_data) ||
+       !assign_vector(unsafe { &mut (*out_refs).e }, &symref_offsets) {
+        bt_release_references(out_refs);
+        set_last_error_str("insufficient memory");
+        return 1;
+    }
+
+    // Compute FNV-1a Hash
+    let mut hash_data = Vec::with_capacity(names_data.len() + symrefs_data.len() + oids.len() * 20);
+    hash_data.extend_from_slice(names_data.as_bytes());
+    for oid in &oids {
+        hash_data.extend_from_slice(&oid.to_bytes());
+    }
+    hash_data.extend_from_slice(symrefs_data.as_bytes());
+    unsafe {
+        (*out_refs).hash = fnv1a(&hash_data);
+    }
+
+    0
+}
+
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 1469598103934665603;
+    for &ch in bytes {
+        hash ^= ch as u64;
+        hash = hash.wrapping_mul(1099511628211);
+    }
+    hash
+}
+
+unsafe fn assign_bytes(buf: &mut BtBuf, data: &str) -> bool {
+    if data.is_empty() {
+        buf.ptr = core::ptr::null_mut();
+        buf.len = 0;
+        buf.cap = 0;
+        return true;
+    }
+    let bytes = data.as_bytes();
+    let ptr = heap_alloc(bytes.len());
+    if ptr.is_null() {
+        return false;
+    }
+    core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+    buf.ptr = ptr as *mut _;
+    buf.len = bytes.len();
+    buf.cap = bytes.len();
+    true
+}
+
+unsafe fn assign_vector<T: Copy>(buf: &mut BtBuf, values: &[T]) -> bool {
+    if values.is_empty() {
+        buf.ptr = core::ptr::null_mut();
+        buf.len = 0;
+        buf.cap = 0;
+        return true;
+    }
+    let bytes_len = values.len() * std::mem::size_of::<T>();
+    let ptr = heap_alloc(bytes_len);
+    if ptr.is_null() {
+        return false;
+    }
+    core::ptr::copy_nonoverlapping(values.as_ptr() as *const u8, ptr, bytes_len);
+    buf.ptr = ptr as *mut _;
+    buf.len = values.len();
+    buf.cap = values.len();
+    true
+}
+
+fn collect_loose_refs(
+    git_dir: &Path,
+    relative_dir: &str,
+    refs: &mut BTreeMap<String, NativeRefEntry>,
+) {
+    let full_path = git_dir.join(relative_dir);
+    if let Ok(entries) = std::fs::read_dir(full_path) {
+        for entry in entries.flatten() {
+            if let Ok(ft) = entry.file_type() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let child_relative = format!("{relative_dir}/{name}");
+                if ft.is_dir() {
+                    collect_loose_refs(git_dir, &child_relative, refs);
+                } else {
+                    if let Ok(content_bytes) = std::fs::read(entry.path()) {
+                        let text = String::from_utf8_lossy(&content_bytes).trim().to_string();
+                        let mut item = NativeRefEntry {
+                            name: child_relative,
+                            symref: String::new(),
+                            has_oid: false,
+                            oid: BtOid { s0: 0, s1: 0, s2: 0, s3: 0, s4: 0 },
+                            has_peeled_oid: false,
+                            peeled_oid: BtOid { s0: 0, s1: 0, s2: 0, s3: 0, s4: 0 },
+                        };
+                        if text.starts_with("ref: ") {
+                            item.symref = text[5..].trim().to_string();
+                        } else {
+                            if let Some(parsed) = parse_hex_oid(&text) {
+                                item.oid = parsed;
+                                item.has_oid = true;
+                            }
+                        }
+                        if item.has_oid || !item.symref.is_empty() {
+                            add_or_update_ref(refs, item);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn collect_packed_refs(
+    git_dir: &Path,
+    refs: &mut BTreeMap<String, NativeRefEntry>,
+) {
+    let packed_path = git_dir.join("packed-refs");
+    if let Ok(content) = std::fs::read_to_string(&packed_path) {
+        let mut last_ref = String::new();
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if trimmed.starts_with('^') {
+                if !last_ref.is_empty() {
+                    if let Some(peeled) = parse_hex_oid(&trimmed[1..]) {
+                        let item = NativeRefEntry {
+                            name: last_ref.clone(),
+                            symref: String::new(),
+                            has_oid: false,
+                            oid: BtOid { s0: 0, s1: 0, s2: 0, s3: 0, s4: 0 },
+                            has_peeled_oid: true,
+                            peeled_oid: peeled,
+                        };
+                        add_or_update_ref(refs, item);
+                    }
+                }
+                continue;
+            }
+            if let Some(space) = trimmed.find(' ') {
+                let sha = &trimmed[..space];
+                let ref_name = trimmed[space + 1..].trim();
+                if let Some(oid) = parse_hex_oid(sha) {
+                    if ref_name.starts_with("refs/") {
+                        let item = NativeRefEntry {
+                            name: ref_name.to_string(),
+                            symref: String::new(),
+                            has_oid: true,
+                            oid,
+                            has_peeled_oid: false,
+                            peeled_oid: BtOid { s0: 0, s1: 0, s2: 0, s3: 0, s4: 0 },
+                        };
+                        add_or_update_ref(refs, item);
+                        last_ref = ref_name.to_string();
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn add_or_update_ref(
+    refs: &mut BTreeMap<String, NativeRefEntry>,
+    entry: NativeRefEntry,
+) {
+    match refs.get_mut(&entry.name) {
+        Some(existing) => {
+            if !entry.symref.is_empty() {
+                existing.symref = entry.symref;
+            }
+            if entry.has_oid {
+                existing.oid = entry.oid;
+                existing.has_oid = true;
+            }
+            if entry.has_peeled_oid {
+                existing.peeled_oid = entry.peeled_oid;
+                existing.has_peeled_oid = true;
+            }
+        }
+        None => {
+            refs.insert(entry.name.clone(), entry);
+        }
+    }
+}
+
+fn peel_tag_object(repo: &git2::Repository, oid: BtOid) -> BtOid {
+    let raw_oid = oid.to_bytes();
+    if let Ok(git2_oid) = git2::Oid::from_bytes(&raw_oid) {
+        if let Ok(obj) = repo.find_object(git2_oid, None) {
+            if let Ok(peeled) = obj.peel(git2::ObjectType::Commit) {
+                let peeled_id = peeled.id();
+                let bytes = peeled_id.as_bytes();
+                return BtOid::from_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                    bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+                    bytes[16], bytes[17], bytes[18], bytes[19]
+                ]);
+            }
+        }
+    }
+    oid
+}
+
+fn parse_hex_oid(hex40: &str) -> Option<BtOid> {
+    let b = hex40.as_bytes();
+    if b.len() < 40 {
+        return None;
+    }
+    let mut parts = [0u32; 5];
+    for p in 0..5 {
+        let mut value = 0u32;
+        for i in 0..8 {
+            let c = b[p * 8 + i];
+            let nibble = match c {
+                b'0'..=b'9' => c - b'0',
+                b'a'..=b'f' => c - b'a' + 10,
+                b'A'..=b'F' => c - b'A' + 10,
+                _ => return None,
+            };
+            value = (value << 4) | (nibble as u32);
+        }
+        parts[p] = value;
+    }
+    Some(BtOid {
+        s0: parts[0],
+        s1: parts[1],
+        s2: parts[2],
+        s3: parts[3],
+        s4: parts[4],
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn bt_release_references(p: *mut BtReferences) {
+    if p.is_null() {
+        return;
+    }
+    
+    let a_ptr = std::ptr::replace(&mut (*p).a.ptr, core::ptr::null_mut());
+    (*p).a.cap = 0;
+    (*p).a.len = 0;
+    if !a_ptr.is_null() {
+        heap_free(a_ptr);
+    }
+
+    let b_ptr = std::ptr::replace(&mut (*p).b.ptr, core::ptr::null_mut());
+    (*p).b.cap = 0;
+    (*p).b.len = 0;
+    if !b_ptr.is_null() {
+        heap_free(b_ptr);
+    }
+
+    let c_ptr = std::ptr::replace(&mut (*p).c.ptr, core::ptr::null_mut());
+    (*p).c.cap = 0;
+    (*p).c.len = 0;
+    if !c_ptr.is_null() {
+        heap_free(c_ptr);
+    }
+
+    let d_ptr = std::ptr::replace(&mut (*p).d.ptr, core::ptr::null_mut());
+    (*p).d.cap = 0;
+    (*p).d.len = 0;
+    if !d_ptr.is_null() {
+        heap_free(d_ptr);
+    }
+
+    let e_ptr = std::ptr::replace(&mut (*p).e.ptr, core::ptr::null_mut());
+    (*p).e.cap = 0;
+    (*p).e.len = 0;
+    if !e_ptr.is_null() {
+        heap_free(e_ptr);
+    }
+
+    (*p).hash = 0;
+}
