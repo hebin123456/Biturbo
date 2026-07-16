@@ -1,10 +1,11 @@
 name: CI
 
+# CI runs only on tag pushes (v*). Pushing to master does not trigger a
+# build; the Release workflow (also tag-triggered) handles publishing.
 on:
   push:
-    branches: [master]
-  pull_request:
-    branches: [master]
+    tags:
+      - 'v*'
 
 env:
   CARGO_TERM_COLOR: always
