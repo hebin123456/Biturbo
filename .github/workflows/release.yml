@@ -26,6 +26,9 @@ jobs:
         with:
           target: x86_64-pc-windows-msvc
 
+      - name: Set up MSVC dev environment (for dumpbin)
+        uses: ilammy/msvc-dev-cmd@v1
+
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -51,6 +54,13 @@ jobs:
 
       - name: Build release cdylib
         run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Verify symbol exports match biturbo.def
+        shell: bash
+        run: |
+          python3 scripts/check_exports.py \
+            target/x86_64-pc-windows-msvc/release/biturbo.dll \
+            biturbo.def
 
       - name: Stage release artifacts
         shell: bash
