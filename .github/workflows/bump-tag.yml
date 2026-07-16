@@ -1,0 +1,91 @@
+name: Bump & Tag
+
+# Auto-tag: manually trigger a version bump. This workflow bumps the version
+# in Cargo.toml, commits it, and pushes a `vX.Y.Z` tag — which then triggers
+# release.yml to build and publish the GitHub Release automatically.
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: 'Version bump type'
+        required: true
+        type: choice
+        default: patch
+        options:
+          - patch
+          - minor
+          - major
+          - prerelease
+
+permissions:
+  contents: write
+
+jobs:
+  bump-and-tag:
+    name: Bump version and push tag
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need full history + token to commit & push back.
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute next version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUMP="${{ github.event.inputs.bump }}"
+
+          CURRENT=$(grep -m1 -E '^version = ' Cargo.toml | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?')
+          echo "Current version: $CURRENT"
+
+          IFS='.' read -r MAJOR MINOR PATCH <<< "${CURRENT%%-*}"
+          # Strip any pre-release suffix from PATCH for arithmetic.
+          PATCH_BASE="${PATCH%%-*}"
+
+          case "$BUMP" in
+            major)
+              NEXT="$((MAJOR+1)).0.0" ;;
+            minor)
+              NEXT="$MAJOR.$((MINOR+1)).0" ;;
+            patch)
+              NEXT="$MAJOR.$MINOR.$((PATCH_BASE+1))" ;;
+            prerelease)
+              NEXT="$MAJOR.$MINOR.$((PATCH_BASE+1))-pre" ;;
+            *)
+              echo "Unknown bump type: $BUMP" >&2; exit 1 ;;
+          esac
+
+          echo "Next version: $NEXT"
+          echo "version=$NEXT" >> "$GITHUB_OUTPUT"
+          echo "tag=v$NEXT" >> "$GITHUB_OUTPUT"
+
+      - name: Update Cargo.toml
+        shell: bash
+        run: |
+          NEXT="${{ steps.ver.outputs.version }}"
+          sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?\"$/s//version = \"$NEXT\"/" Cargo.toml
+          grep -m1 -E '^version = ' Cargo.toml
+
+      - name: Commit and push tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          NEXT="${{ steps.ver.outputs.version }}"
+          TAG="${{ steps.ver.outputs.tag }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add Cargo.toml
+          git commit -m "chore(release): $NEXT"
+
+          # Tag the release commit and push both commit + tag.
+          git tag "$TAG"
+          git push origin HEAD:master
+          git push origin "$TAG"
+
+          echo "Pushed tag $TAG — release.yml will take it from here."
