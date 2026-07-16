@@ -1,7 +1,9 @@
 name: Release
 
-# Auto-release: pushing a `v*` tag builds the Windows cdylib and publishes
-# a GitHub Release with the artifacts attached.
+# Pushing a `v*` tag triggers this single pipeline: build, test, verify, and
+# publish a GitHub Release. CI is folded in here so the DLL is built only once
+# per tag (previously CI and Release each built independently). Pushing to
+# master does not trigger anything.
 on:
   push:
     tags:
@@ -15,7 +17,7 @@ env:
 
 jobs:
   release-windows:
-    name: Release (Windows x64, MSVC)
+    name: Build + Test + Release (Windows x64, MSVC)
     runs-on: windows-latest
 
     steps:
@@ -54,6 +56,22 @@ jobs:
 
       - name: Build release cdylib
         run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Smoke-test library unit tests
+        # Integration tests under tests/ require the original biturbo.dll
+        # (not in this repo), so only the lib unit-test harness is run.
+        run: cargo test --lib --release --target x86_64-pc-windows-msvc
+
+      - name: Verify build output (PE magic + size)
+        shell: bash
+        run: |
+          set -e
+          DLL="target/x86_64-pc-windows-msvc/release/biturbo.dll"
+          test -f "$DLL" || { echo "biturbo.dll not found"; exit 1; }
+          SIZE=$(wc -c < "$DLL")
+          echo "Built: $DLL ($SIZE bytes)"
+          # Sanity: first two bytes should be 'MZ' (PE/DLL magic).
+          head -c 2 "$DLL" | od -An -c | grep -q 'M   Z' && echo "PE magic OK"
 
       - name: Verify symbol exports match biturbo.def
         shell: bash
