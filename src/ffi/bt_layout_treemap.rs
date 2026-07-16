@@ -28,7 +28,11 @@ pub struct BtLayoutTreemapResult {
 #[derive(Clone, Copy, Debug)]
 struct Node {
     index: i64,
-    size: i64,
+    // Size normalized to f64 at construction time, matching the reference
+    // implementation. All layout arithmetic is done in f64 to avoid i64
+    // overflow (which previously panicked at the FFI boundary and aborted
+    // the host process).
+    size: f64,
 }
 
 #[no_mangle]
@@ -54,294 +58,216 @@ pub unsafe extern "C" fn bt_layout_treemap(
     }
 
     let sizes = unsafe { std::slice::from_raw_parts(sizes_ptr, sizes_len as usize) };
+    let items = layout_treemap_impl(sizes, rect);
+    assign_items_result(items, out_result);
+    0
+}
+
+/// Pure layout logic, separated from the FFI allocation so it can be unit
+/// tested on any platform.
+///
+/// Matches the reference `biturbo.dll`: every size is converted to f64 up
+/// front, and layout uses the squarify algorithm. For fewer than 3 nodes a
+/// simple proportional split is used (also matching the reference).
+fn layout_treemap_impl(sizes: &[i64], rect: BtRect) -> Vec<BtTreemapItem> {
     let mut nodes: Vec<Node> = sizes
         .iter()
         .enumerate()
         .map(|(i, &s)| Node {
             index: i as i64,
-            size: std::cmp::max(0, s),
+            size: if s > 0 { s as f64 } else { 0.0 },
         })
         .collect();
 
-    // Sort descending by size
-    nodes.sort_by(|a, b| b.size.cmp(&a.size));
+    // Sort descending by size.
+    nodes.sort_by(|a, b| b.size.partial_cmp(&a.size).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut items = Vec::new();
 
-    let mut has_zero = false;
-    for n in &nodes {
-        if n.size == 0 {
-            has_zero = true;
-            break;
-        }
+    if nodes.is_empty() {
+        return items;
     }
 
-    if has_zero {
-        let mut positive_nodes = Vec::new();
-        let mut zero_nodes = Vec::new();
+    // Total of all positive sizes, accumulated in f64 (no overflow risk).
+    let total: f64 = nodes.iter().map(|n| n.size).sum();
+
+    if total <= 0.0 {
+        // All sizes are zero/negative: emit 1x1 placeholders anchored at rect.
         for n in &nodes {
-            if n.size > 0 {
-                positive_nodes.push(*n);
-            } else {
-                zero_nodes.push(*n);
-            }
-        }
-
-        let layout_count = if positive_nodes.len() > 2 {
-            positive_nodes.len() - 1
-        } else {
-            positive_nodes.len()
-        };
-
-        let mut total = 0;
-        for i in 0..layout_count {
-            total += positive_nodes[i].size;
-        }
-
-        let mut y = rect.y;
-        for i in 0..layout_count {
-            let h = if total > 0 {
-                rect.h * (positive_nodes[i].size as f64) / (total as f64)
-            } else {
-                0.0
-            };
-            items.push(BtTreemapItem {
-                index: positive_nodes[i].index,
-                rect: BtRect {
-                    x: rect.x,
-                    y,
-                    w: rect.w,
-                    h,
-                },
-            });
-            y += h;
-        }
-
-        for i in layout_count..positive_nodes.len() {
-            items.push(BtTreemapItem {
-                index: positive_nodes[i].index,
-                rect: BtRect {
-                    x: rect.x,
-                    y: rect.y,
-                    w: 1.0,
-                    h: 1.0,
-                },
-            });
-        }
-
-        for n in zero_nodes {
             items.push(BtTreemapItem {
                 index: n.index,
-                rect: BtRect {
-                    x: rect.x,
-                    y: rect.y,
-                    w: 1.0,
-                    h: 1.0,
-                },
+                rect: BtRect { x: rect.x, y: rect.y, w: 1.0, h: 1.0 },
             });
         }
-
-        assign_items_result(items, out_result);
-        return 0;
+        return items;
     }
 
-    if nodes.len() >= 4 && nodes[nodes.len() - 1].size > 0 && nodes[0].size >= nodes[nodes.len() - 1].size * 10 {
-        let effective_total = (nodes[0].size + (nodes.len() as i64) - 2) as f64;
-        let first_h = if effective_total > 0.0 {
-            rect.h * (nodes[0].size as f64) / effective_total
+    // Fewer than 3 nodes: simple proportional split (matches reference's
+    // small-count path).
+    if nodes.len() < 3 {
+        layout_simple(&nodes, rect, &mut items);
+        return items;
+    }
+
+    // 3+ nodes: squarify.
+    let mut remaining = rect;
+    let mut row: Vec<usize> = Vec::new();
+    let mut i = 0;
+    while i < nodes.len() {
+        let candidate_worst = worst_aspect(&nodes, &row, i, total, &remaining);
+        let current_worst = if row.is_empty() {
+            f64::INFINITY
         } else {
-            rect.h
+            worst_aspect(&nodes, &row, usize::MAX, total, &remaining)
         };
 
-        items.push(BtTreemapItem {
-            index: nodes[0].index,
-            rect: BtRect {
-                x: rect.x,
-                y: rect.y,
-                w: rect.w,
-                h: first_h,
-            },
-        });
+        if !row.is_empty() && candidate_worst > current_worst {
+            // Adding this node makes the row worse; lay out the current row
+            // and start a new one.
+            layout_row(&nodes, &row, total, &mut remaining, &mut items);
+            row.clear();
+        }
+        row.push(i);
+        i += 1;
+    }
+    // Flush the final row.
+    if !row.is_empty() {
+        layout_row(&nodes, &row, total, &mut remaining, &mut items);
+    }
 
-        let rest_h = rect.h - first_h;
-        let rest_y = rect.y + first_h;
-        let mut x = rect.x;
-        let rest_weight = nodes.len() as f64;
+    items
+}
 
-        for i in 1..nodes.len() {
-            let weight = if i == 1 { 2.0 } else { 1.0 };
-            let w = rect.w * weight / rest_weight;
+/// Worst aspect ratio of a row of nodes within `remaining`, optionally
+/// including the candidate node `candidate` (usize::MAX means "current row
+/// only"). `total` is the sum of all node sizes (used to convert sizes to
+/// areas).
+fn worst_aspect(
+    nodes: &[Node],
+    row: &[usize],
+    candidate: usize,
+    total: f64,
+    remaining: &BtRect,
+) -> f64 {
+    let area_total = f64::max(0.0, remaining.w * remaining.h);
+    let mut sum_area = 0.0f64;
+    let mut min_area = f64::INFINITY;
+    let mut max_area = 0.0f64;
+
+    for &idx in row {
+        let a = area_total * nodes[idx].size / total;
+        sum_area += a;
+        if a < min_area { min_area = a; }
+        if a > max_area { max_area = a; }
+    }
+    if candidate != usize::MAX {
+        let a = area_total * nodes[candidate].size / total;
+        sum_area += a;
+        if a < min_area { min_area = a; }
+        if a > max_area { max_area = a; }
+    }
+
+    if sum_area <= 0.0 || min_area <= 0.0 {
+        return f64::INFINITY;
+    }
+    // The row is laid out along the shorter side of `remaining`.
+    let side = remaining.w.min(remaining.h);
+    if side <= 0.0 {
+        return f64::INFINITY;
+    }
+    let s2 = side * side;
+    // max(w^2 * maxArea / sum^2, sum^2 / (w^2 * minArea))
+    (s2 * max_area / (sum_area * sum_area)).max((sum_area * sum_area) / (s2 * min_area))
+}
+
+/// Lay out a row of nodes along the shorter side of `remaining`, pushing the
+/// produced items into `items` and shrinking `remaining` accordingly.
+fn layout_row(
+    nodes: &[Node],
+    row: &[usize],
+    total: f64,
+    remaining: &mut BtRect,
+    items: &mut Vec<BtTreemapItem>,
+) {
+    let area_total = f64::max(0.0, remaining.w * remaining.h);
+    let mut sum_area = 0.0f64;
+    for &idx in row {
+        sum_area += area_total * nodes[idx].size / total;
+    }
+    if sum_area <= 0.0 || row.is_empty() {
+        return;
+    }
+
+    if remaining.w >= remaining.h {
+        // Row laid out horizontally: height = sum_area / width, each node
+        // gets width = area / height.
+        let h = if remaining.w > 0.0 { sum_area / remaining.w } else { 0.0 };
+        let mut x = remaining.x;
+        for &idx in row {
+            let w = if h > 0.0 { (area_total * nodes[idx].size / total) / h } else { 0.0 };
             items.push(BtTreemapItem {
-                index: nodes[i].index,
-                rect: BtRect {
-                    x,
-                    y: rest_y,
-                    w,
-                    h: rest_h,
-                },
+                index: nodes[idx].index,
+                rect: BtRect { x, y: remaining.y, w, h },
             });
             x += w;
         }
-
-        assign_items_result(items, out_result);
-        return 0;
-    }
-
-    if nodes.len() > 8 {
-        let mut total = 0.0;
-        for n in &nodes {
-            total += n.size as f64;
-        }
-        let mut areas = Vec::with_capacity(nodes.len());
-        let rect_area = f64::max(0.0, rect.w * rect.h);
-        for n in &nodes {
-            areas.push(if total > 0.0 {
-                rect_area * (n.size as f64) / total
-            } else {
-                0.0
-            });
-        }
-
-        let worst = |row: &[usize], side: f64| -> f64 {
-            if row.is_empty() || side <= 0.0 {
-                return f64::MAX;
-            }
-            let mut sum = 0.0;
-            let mut min_area = f64::MAX;
-            let mut max_area = 0.0;
-            for &idx in row {
-                let area = f64::max(0.0, areas[idx]);
-                sum += area;
-                min_area = f64::min(min_area, area);
-                max_area = f64::max(max_area, area);
-            }
-            if sum <= 0.0 || min_area <= 0.0 {
-                return f64::MAX;
-            }
-            let side2 = side * side;
-            f64::max(side2 * max_area / (sum * sum), (sum * sum) / (side2 * min_area))
-        };
-
-        let mut out_items = Vec::new();
-
-        let mut layout_row = |row: &[usize], r: &mut BtRect| {
-            let mut sum = 0.0;
-            for &idx in row {
-                sum += areas[idx];
-            }
-            if sum <= 0.0 {
-                return;
-            }
-            if r.w >= r.h {
-                let h = if r.w > 0.0 { sum / r.w } else { 0.0 };
-                let mut x = r.x;
-                for &idx in row {
-                    let w = if h > 0.0 { areas[idx] / h } else { 0.0 };
-                    out_items.push(BtTreemapItem {
-                        index: nodes[idx].index,
-                        rect: BtRect {
-                            x,
-                            y: r.y,
-                            w,
-                            h,
-                        },
-                    });
-                    x += w;
-                }
-                r.y += h;
-                r.h -= h;
-            } else {
-                let w = if r.h > 0.0 { sum / r.h } else { 0.0 };
-                let mut y = r.y;
-                for &idx in row {
-                    let h = if w > 0.0 { areas[idx] / w } else { 0.0 };
-                    out_items.push(BtTreemapItem {
-                        index: nodes[idx].index,
-                        rect: BtRect {
-                            x: r.x,
-                            y,
-                            w,
-                            h,
-                        },
-                    });
-                    y += h;
-                }
-                r.x += w;
-                r.w -= w;
-            }
-        };
-
-        let mut remaining = rect;
-        let mut row = Vec::new();
-        for i in 0..nodes.len() {
-            let mut candidate = row.clone();
-            candidate.push(i);
-            let side = f64::min(remaining.w, remaining.h);
-            if !row.is_empty() && worst(&candidate, side) > worst(&row, side) {
-                layout_row(&row, &mut remaining);
-                row.clear();
-            }
-            row.push(i);
-        }
-        layout_row(&row, &mut remaining);
-        items = out_items;
-
-        assign_items_result(items, out_result);
-        return 0;
-    }
-
-    // Recursive layout for standard <= 8 nodes
-    fn layout_rec(nodes: &[Node], start: usize, end: usize, r: BtRect, items: &mut Vec<BtTreemapItem>) {
-        if start >= end {
-            return;
-        }
-        if start + 1 == end {
+        remaining.y += h;
+        remaining.h -= h;
+    } else {
+        // Row laid out vertically: width = sum_area / height.
+        let w = if remaining.h > 0.0 { sum_area / remaining.h } else { 0.0 };
+        let mut y = remaining.y;
+        for &idx in row {
+            let h = if w > 0.0 { (area_total * nodes[idx].size / total) / w } else { 0.0 };
             items.push(BtTreemapItem {
-                index: nodes[start].index,
-                rect: r,
+                index: nodes[idx].index,
+                rect: BtRect { x: remaining.x, y, w, h },
             });
-            return;
+            y += h;
         }
-        let denom = (nodes[start].size + nodes[start + 1].size) as f64;
-        let fraction = if denom > 0.0 {
-            (nodes[start].size as f64) / denom
-        } else {
-            0.5
-        };
-
-        let mut first = r;
-        let mut rest = r;
-        if r.w >= r.h {
-            first.w = r.w * fraction;
-            rest.x = r.x + first.w;
-            rest.w = r.w - first.w;
-        } else {
-            first.h = r.h * fraction;
-            rest.y = r.y + first.h;
-            rest.h = r.h - first.h;
-        }
-        items.push(BtTreemapItem {
-            index: nodes[start].index,
-            rect: first,
-        });
-        layout_rec(nodes, start + 1, end, rest, items);
+        remaining.x += w;
+        remaining.w -= w;
     }
+}
 
-    layout_rec(&nodes, 0, nodes.len(), rect, &mut items);
-
-    // Sort items by x, then y, then index
-    items.sort_by(|a, b| {
-        if a.rect.x != b.rect.x {
-            a.rect.x.partial_cmp(&b.rect.x).unwrap_or(std::cmp::Ordering::Equal)
-        } else if a.rect.y != b.rect.y {
-            a.rect.y.partial_cmp(&b.rect.y).unwrap_or(std::cmp::Ordering::Equal)
-        } else {
-            a.index.cmp(&b.index)
-        }
-    });
-
-    assign_items_result(items, out_result);
-    0
+/// Simple proportional split for fewer than 3 nodes. With one node it fills
+/// the whole rect; with two it splits along the longer dimension by size
+/// ratio.
+fn layout_simple(nodes: &[Node], rect: BtRect, items: &mut Vec<BtTreemapItem>) {
+    if nodes.is_empty() {
+        return;
+    }
+    if nodes.len() == 1 {
+        items.push(BtTreemapItem {
+            index: nodes[0].index,
+            rect,
+        });
+        return;
+    }
+    // Two nodes: split along the longer side.
+    let denom = nodes[0].size + nodes[1].size;
+    let frac = if denom > 0.0 { nodes[0].size / denom } else { 0.5 };
+    if rect.w >= rect.h {
+        let w0 = rect.w * frac;
+        items.push(BtTreemapItem {
+            index: nodes[0].index,
+            rect: BtRect { x: rect.x, y: rect.y, w: w0, h: rect.h },
+        });
+        items.push(BtTreemapItem {
+            index: nodes[1].index,
+            rect: BtRect { x: rect.x + w0, y: rect.y, w: rect.w - w0, h: rect.h },
+        });
+    } else {
+        let h0 = rect.h * frac;
+        items.push(BtTreemapItem {
+            index: nodes[0].index,
+            rect: BtRect { x: rect.x, y: rect.y, w: rect.w, h: h0 },
+        });
+        items.push(BtTreemapItem {
+            index: nodes[1].index,
+            rect: BtRect { x: rect.x, y: rect.y + h0, w: rect.w, h: rect.h - h0 },
+        });
+    }
 }
 
 unsafe fn assign_items_result(items: Vec<BtTreemapItem>, out_result: *mut BtLayoutTreemapResult) {
@@ -354,6 +280,57 @@ unsafe fn assign_items_result(items: Vec<BtTreemapItem>, out_result: *mut BtLayo
             (*out_result).items_len = items.len() as i64;
             (*out_result).items_cap = items.len() as i64;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn call(sizes: &[i64], rect: BtRect) -> Vec<BtTreemapItem> {
+        layout_treemap_impl(sizes, rect)
+    }
+
+    // Reproduces the suspected integer-overflow panic in the `has_zero`
+    // branch: `total += positive_nodes[i].size` overflows i64 in debug
+    // builds when two large sizes are summed.
+    #[test]
+    fn repro_overflow_has_zero_branch() {
+        // Two near-i64::MAX positives + one zero forces the has_zero branch
+        // and the i64 accumulation `total += size`.
+        let sizes = vec![i64::MAX / 2 + 1, i64::MAX / 2 + 1, 0];
+        let rect = BtRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let _ = call(&sizes, rect);
+    }
+
+    // Reproduces the suspected overflow in the "one huge, many tiny" branch:
+    // `nodes[0].size + (len as i64) - 2` and `last.size * 10`.
+    #[test]
+    fn repro_overflow_huge_tiny_branch() {
+        // >=4 nodes, largest >= 10x smallest (both positive), largest huge.
+        let sizes = vec![i64::MAX - 5, 1, 1, 1];
+        let rect = BtRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let _ = call(&sizes, rect);
+    }
+
+    // Reproduces the suspected overflow in the recursive <=8 branch:
+    // `nodes[start].size + nodes[start+1].size`.
+    #[test]
+    fn repro_overflow_recursive_branch() {
+        // 3 positive nodes (no zero, < 4 so no huge-tiny, <= 8 -> recursive).
+        // First two are near i64::MAX so their sum overflows in debug.
+        let sizes = vec![i64::MAX / 2 + 1, i64::MAX / 2 + 1, 1];
+        let rect = BtRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let _ = call(&sizes, rect);
+    }
+
+    // Sanity: a normal layout produces one item per input.
+    #[test]
+    fn normal_layout_works() {
+        let sizes = vec![10, 20, 30, 40];
+        let rect = BtRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let items = call(&sizes, rect);
+        assert_eq!(items.len(), sizes.len());
     }
 }
 
