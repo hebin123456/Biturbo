@@ -3,6 +3,7 @@ name = "biturbo"
 version = "1.0.1"
 edition = "2021"
 build = "build.rs"
+license = "MIT"
 
 [lib]
 name = "biturbo"
