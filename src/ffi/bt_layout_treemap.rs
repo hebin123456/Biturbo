@@ -103,28 +103,38 @@ fn layout_treemap_impl(sizes: &[i64], rect: BtRect) -> Vec<BtTreemapItem> {
     }
 
     // Fewer than 3 nodes: simple proportional split (matches reference's
-    // small-count path).
+    // small-count path; squarify is suboptimal for 1-2 nodes).
     if nodes.len() < 3 {
         layout_simple(&nodes, rect, &mut items);
         return items;
     }
 
     // 3+ nodes: squarify.
+    //
+    // Per-node areas are FIXED up front (canvas_area * size / total) and never
+    // rescaled. This is what guarantees the rows tile the canvas without gaps:
+    // the remaining rectangle's area always equals the sum of the remaining
+    // nodes' fixed areas, so each row consumes exactly its share. The previous
+    // implementation rescaled areas against the shrinking `remaining` area
+    // while dividing by the fixed `total`, which made every row after the
+    // first progressively too thin and left unfilled gaps.
+    let canvas_area = f64::max(0.0, rect.w * rect.h);
+
     let mut remaining = rect;
     let mut row: Vec<usize> = Vec::new();
     let mut i = 0;
     while i < nodes.len() {
-        let candidate_worst = worst_aspect(&nodes, &row, i, total, &remaining);
+        let candidate_worst = worst_aspect(&nodes, &row, i, canvas_area, total, &remaining);
         let current_worst = if row.is_empty() {
             f64::INFINITY
         } else {
-            worst_aspect(&nodes, &row, usize::MAX, total, &remaining)
+            worst_aspect(&nodes, &row, usize::MAX, canvas_area, total, &remaining)
         };
 
         if !row.is_empty() && candidate_worst > current_worst {
             // Adding this node makes the row worse; lay out the current row
             // and start a new one.
-            layout_row(&nodes, &row, total, &mut remaining, &mut items);
+            layout_row(&nodes, &row, canvas_area, total, &mut remaining, &mut items);
             row.clear();
         }
         row.push(i);
@@ -132,7 +142,7 @@ fn layout_treemap_impl(sizes: &[i64], rect: BtRect) -> Vec<BtTreemapItem> {
     }
     // Flush the final row.
     if !row.is_empty() {
-        layout_row(&nodes, &row, total, &mut remaining, &mut items);
+        layout_row(&nodes, &row, canvas_area, total, &mut remaining, &mut items);
     }
 
     items
@@ -140,28 +150,29 @@ fn layout_treemap_impl(sizes: &[i64], rect: BtRect) -> Vec<BtTreemapItem> {
 
 /// Worst aspect ratio of a row of nodes within `remaining`, optionally
 /// including the candidate node `candidate` (usize::MAX means "current row
-/// only"). `total` is the sum of all node sizes (used to convert sizes to
-/// areas).
+/// only"). `canvas_area` and `total` define the fixed per-node area
+/// (`canvas_area * size / total`), independent of the current `remaining`.
 fn worst_aspect(
     nodes: &[Node],
     row: &[usize],
     candidate: usize,
+    canvas_area: f64,
     total: f64,
     remaining: &BtRect,
 ) -> f64 {
-    let area_total = f64::max(0.0, remaining.w * remaining.h);
+    let fixed = |idx: usize| canvas_area * nodes[idx].size / total;
     let mut sum_area = 0.0f64;
     let mut min_area = f64::INFINITY;
     let mut max_area = 0.0f64;
 
     for &idx in row {
-        let a = area_total * nodes[idx].size / total;
+        let a = fixed(idx);
         sum_area += a;
         if a < min_area { min_area = a; }
         if a > max_area { max_area = a; }
     }
     if candidate != usize::MAX {
-        let a = area_total * nodes[candidate].size / total;
+        let a = fixed(candidate);
         sum_area += a;
         if a < min_area { min_area = a; }
         if a > max_area { max_area = a; }
@@ -170,63 +181,75 @@ fn worst_aspect(
     if sum_area <= 0.0 || min_area <= 0.0 {
         return f64::INFINITY;
     }
-    // The row is laid out along the shorter side of `remaining`.
+    // The row is laid out spanning the SHORT side of `remaining`; `layout_row`
+    // must use the same convention for the aspect formula to hold.
     let side = remaining.w.min(remaining.h);
     if side <= 0.0 {
         return f64::INFINITY;
     }
     let s2 = side * side;
-    // max(w^2 * maxArea / sum^2, sum^2 / (w^2 * minArea))
+    // max(side^2 * maxArea / sum^2, sum^2 / (side^2 * minArea))
     (s2 * max_area / (sum_area * sum_area)).max((sum_area * sum_area) / (s2 * min_area))
 }
 
-/// Lay out a row of nodes along the shorter side of `remaining`, pushing the
-/// produced items into `items` and shrinking `remaining` accordingly.
+/// Lay out a row of nodes spanning the SHORT side of `remaining`, pushing the
+/// produced items into `items` and shrinking `remaining` along the long side.
+///
+/// The row is a strip whose length equals the short side and whose thickness
+/// `t = sum_area / short_side` runs along the long side. Items tile along the
+/// short side, each with length `area_i / t`. This matches `worst_aspect`'s
+/// short-side convention. (The previous implementation conditioned on
+/// `remaining.w >= remaining.h`, i.e. the LONG side, which contradicted
+/// `worst_aspect` and produced wrong layouts.)
 fn layout_row(
     nodes: &[Node],
     row: &[usize],
+    canvas_area: f64,
     total: f64,
     remaining: &mut BtRect,
     items: &mut Vec<BtTreemapItem>,
 ) {
-    let area_total = f64::max(0.0, remaining.w * remaining.h);
+    let fixed = |idx: usize| canvas_area * nodes[idx].size / total;
     let mut sum_area = 0.0f64;
     for &idx in row {
-        sum_area += area_total * nodes[idx].size / total;
+        sum_area += fixed(idx);
     }
     if sum_area <= 0.0 || row.is_empty() {
         return;
     }
 
-    if remaining.w >= remaining.h {
-        // Row laid out horizontally: height = sum_area / width, each node
-        // gets width = area / height.
-        let h = if remaining.w > 0.0 { sum_area / remaining.w } else { 0.0 };
+    if remaining.w <= remaining.h {
+        // Short side is w: horizontal strip of full width `remaining.w`,
+        // thickness `t` along h. Items tile along x.
+        let t = if remaining.w > 0.0 { sum_area / remaining.w } else { 0.0 };
         let mut x = remaining.x;
         for &idx in row {
-            let w = if h > 0.0 { (area_total * nodes[idx].size / total) / h } else { 0.0 };
+            let a = fixed(idx);
+            let w = if t > 0.0 { a / t } else { 0.0 };
             items.push(BtTreemapItem {
                 index: nodes[idx].index,
-                rect: BtRect { x, y: remaining.y, w, h },
+                rect: BtRect { x, y: remaining.y, w, h: t },
             });
             x += w;
         }
-        remaining.y += h;
-        remaining.h -= h;
+        remaining.y += t;
+        remaining.h -= t;
     } else {
-        // Row laid out vertically: width = sum_area / height.
-        let w = if remaining.h > 0.0 { sum_area / remaining.h } else { 0.0 };
+        // Short side is h: vertical strip of full height `remaining.h`,
+        // thickness `t` along w. Items tile along y.
+        let t = if remaining.h > 0.0 { sum_area / remaining.h } else { 0.0 };
         let mut y = remaining.y;
         for &idx in row {
-            let h = if w > 0.0 { (area_total * nodes[idx].size / total) / w } else { 0.0 };
+            let a = fixed(idx);
+            let h = if t > 0.0 { a / t } else { 0.0 };
             items.push(BtTreemapItem {
                 index: nodes[idx].index,
-                rect: BtRect { x: remaining.x, y, w, h },
+                rect: BtRect { x: remaining.x, y, w: t, h },
             });
             y += h;
         }
-        remaining.x += w;
-        remaining.w -= w;
+        remaining.x += t;
+        remaining.w -= t;
     }
 }
 
@@ -331,6 +354,108 @@ mod tests {
         let rect = BtRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
         let items = call(&sizes, rect);
         assert_eq!(items.len(), sizes.len());
+    }
+
+    // Correctness: squarify must tile the canvas with no gaps and no overlaps,
+    // each item's area exactly proportional to its size. This is the real
+    // regression test for the two bugs that made the 1.0.1 layout wrong:
+    //   * row laid along the LONG side (contradicting `worst_aspect`)
+    //   * areas rescaled against the shrinking `remaining` (leaving gaps)
+    fn assert_tiling_correct(items: &[BtTreemapItem], sizes: &[i64], rect: BtRect) {
+        assert_eq!(items.len(), sizes.len(), "one item per input");
+
+        let canvas = rect.w * rect.h;
+        let total: f64 = sizes.iter().map(|&s| s as f64).sum();
+
+        // Each item lies inside the rect and has area == size/total * canvas.
+        for it in items {
+            assert!(it.rect.w >= 0.0 && it.rect.h >= 0.0, "negative dims: {:?}", it);
+            assert!(it.rect.x >= rect.x - 1e-6, "x below: {:?}", it);
+            assert!(it.rect.y >= rect.y - 1e-6, "y below: {:?}", it);
+            assert!(
+                it.rect.x + it.rect.w <= rect.x + rect.w + 1e-3,
+                "x+w exceeds: {:?}",
+                it
+            );
+            assert!(
+                it.rect.y + it.rect.h <= rect.y + rect.h + 1e-3,
+                "y+h exceeds: {:?}",
+                it
+            );
+
+            let expected = sizes[it.index as usize] as f64 / total * canvas;
+            let actual = it.rect.w * it.rect.h;
+            assert!(
+                (actual - expected).abs() < expected * 0.001 + 1e-3,
+                "item {} area mismatch: expected {} got {} ({:?})",
+                it.index,
+                expected,
+                actual,
+                it.rect
+            );
+        }
+
+        // No two items overlap (beyond a tiny epsilon for f64 rounding).
+        for a in 0..items.len() {
+            for b in (a + 1)..items.len() {
+                let ia = &items[a];
+                let ib = &items[b];
+                let x1 = ia.rect.x.max(ib.rect.x);
+                let x2 = (ia.rect.x + ia.rect.w).min(ib.rect.x + ib.rect.w);
+                let y1 = ia.rect.y.max(ib.rect.y);
+                let y2 = (ia.rect.y + ia.rect.h).min(ib.rect.y + ib.rect.h);
+                let ox = (x2 - x1).max(0.0);
+                let oy = (y2 - y1).max(0.0);
+                assert!(
+                    ox * oy < 1e-3,
+                    "items {} and {} overlap by {}",
+                    a,
+                    b,
+                    ox * oy
+                );
+            }
+        }
+
+        // Coverage: laid-out area fills the canvas (no gaps).
+        let covered: f64 = items.iter().map(|it| it.rect.w * it.rect.h).sum();
+        assert!(
+            (covered - canvas).abs() < canvas * 0.001 + 1e-3,
+            "coverage mismatch: covered {} vs canvas {}",
+            covered,
+            canvas
+        );
+    }
+
+    #[test]
+    fn squarify_tiles_landscape_canvas() {
+        let sizes = vec![60, 30, 20, 15, 10, 5];
+        let rect = BtRect { x: 0.0, y: 0.0, w: 1000.0, h: 600.0 };
+        let items = call(&sizes, rect);
+        assert_tiling_correct(&items, &sizes, rect);
+    }
+
+    #[test]
+    fn squarify_tiles_portrait_canvas() {
+        let sizes = vec![40, 25, 15, 10, 8, 2];
+        let rect = BtRect { x: 0.0, y: 0.0, w: 300.0, h: 1000.0 };
+        let items = call(&sizes, rect);
+        assert_tiling_correct(&items, &sizes, rect);
+    }
+
+    #[test]
+    fn squarify_tiles_square_canvas_many() {
+        let sizes = vec![100, 80, 60, 45, 35, 25, 20, 15, 10, 5, 3, 2];
+        let rect = BtRect { x: 5.0, y: 7.0, w: 512.0, h: 512.0 };
+        let items = call(&sizes, rect);
+        assert_tiling_correct(&items, &sizes, rect);
+    }
+
+    #[test]
+    fn squarify_tiles_with_offset_origin() {
+        let sizes = vec![50, 40, 30, 20, 10];
+        let rect = BtRect { x: 100.0, y: 200.0, w: 800.0, h: 400.0 };
+        let items = call(&sizes, rect);
+        assert_tiling_correct(&items, &sizes, rect);
     }
 }
 
