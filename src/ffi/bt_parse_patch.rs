@@ -254,8 +254,9 @@ fn add_diff_header_path_tokens(
                 dst_start += 2;
             }
             add_token(tokens, 1, line_start + src_start, line_start + sec_q);
-        add_token(tokens, 2, line_start + dst_start, line_start + fourth_q);
-        return true;
+            add_token(tokens, 2, line_start + dst_start, line_start + fourth_q);
+            return true;
+        }
     }
 
     false
