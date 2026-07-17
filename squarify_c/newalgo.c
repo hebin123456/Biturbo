@@ -114,7 +114,14 @@ static void layout_rec(Node *nodes, int64_t start, int64_t n, BtRect rect, OutBu
         row_n++;
     }
     double thickness = (double)row_n * frac0 * longd;
-    // emit row [start, start+row_n) along short side, proportional to sizes
+    // Flip detection: when the row has >=2 nodes and the thickness reaches or
+    // exceeds the short side (happens exactly at a1==0.5, n==2, where
+    // thickness == short), the reference swaps the item-tiling axis: items
+    // tile along the LONG side instead of the SHORT side. The remaining rect
+    // still shrinks along the long side by `thickness`.
+    int flip = (row_n >= 2 && !long_is_w && thickness >= shortd);
+    int layout_long_is_w = flip ? !long_is_w : long_is_w;
+    // emit row [start, start+row_n) proportional to sizes
     double row_sum = 0.0;
     for (int64_t i = start; i < start + row_n; i++) row_sum += nodes[i].size;
     if (row_sum <= 0.0) row_sum = 1.0;
@@ -122,17 +129,17 @@ static void layout_rec(Node *nodes, int64_t start, int64_t n, BtRect rect, OutBu
     for (int64_t i = start; i < start + row_n; i++) {
         double item_len = shortd * nodes[i].size / row_sum;
         BtRect r;
-        if (long_is_w) {
-            // thickness along w, items tile along h (short)
+        if (layout_long_is_w) {
+            // thickness along w, items tile along h
             r = (BtRect){rect.x, rect.y + offset, thickness, item_len};
         } else {
-            // thickness along h, items tile along w (short)
+            // thickness along h, items tile along w
             r = (BtRect){rect.x + offset, rect.y, item_len, thickness};
         }
         emit(out, nodes[i].index, r);
         offset += item_len;
     }
-    // remaining rect
+    // remaining rect: always shrinks along the long side by thickness
     BtRect rem;
     if (long_is_w) {
         rem = (BtRect){rect.x + thickness, rect.y, rect.w - thickness, rect.h};

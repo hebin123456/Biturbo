@@ -122,6 +122,20 @@ int main(int argc, char **argv) {
     { int64_t s[]={30,25,20,15,10};    run("5n", s,5, sq); }
     { int64_t s[]={30,25,20,15,10,5,4,3,2,1}; run("10n-stair", s,10, sq); }
 
+    // a1=0.5 boundary cases (n=2 row, worst(1)==worst(2)==2)
+    { int64_t s[]={20,20,10};          run("a1.5 [20,20,10] sq", s,3, sq); }
+    { int64_t s[]={30,30,20};          run("a1.5 [30,30,20] sq", s,3, sq); }
+    { int64_t s[]={15,15,10};          run("a1.5 [15,15,10] sq", s,3, sq); }
+    { int64_t s[]={20,20,10,5};        run("a1.5 [20,20,10,5] sq", s,4, sq); }
+    { int64_t s[]={20,20,20,10};       run("a1.5 [20,20,20,10] sq", s,4, sq); }
+    { int64_t s[]={25,25,20};          run("a1.5 [25,25,20] sq", s,3, sq); }
+    // a1 slightly off 0.5 to find the exact threshold
+    { int64_t s[]={20,20,10};          run("a1.5 [20,20,10] 100x50", s,3, (BtRect){0,0,100,50}); }
+    { int64_t s[]={20,20,10};          run("a1.5 [20,20,10] 50x100", s,3, (BtRect){0,0,50,100}); }
+    // n=1 cases with a1>=2 to verify n=1 never flips
+    { int64_t s[]={50,40,10};          run("n1a1big [50,40,10] sq", s,3, sq); }
+    { int64_t s[]={60,30,10};          run("n1a1big [60,30,10] sq", s,3, sq); }
+
     printf("\n=== SUMMARY: %d cases, exact=%d close=%d diff=%d ===\n",
            total_cases, exact_cases, close_cases, diff_cases);
     return 0;
