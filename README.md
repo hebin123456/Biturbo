@@ -69,9 +69,6 @@ cargo build --release --target x86_64-pc-windows-msvc
 cargo test --lib --release --target x86_64-pc-windows-msvc
 ```
 
-> `tests/` 目录下的集成测试依赖原版 `biturbo.dll`（不在本仓库中），CI 默认只跑
-> `--lib` 单元测试。
-
 ## 用法
 
 ### 作为 libgit2.dll 的替代
@@ -119,8 +116,6 @@ Release 流水线发布新版本。
 ```
 src/
 ├── lib.rs                          # 库入口，声明 ffi 模块
-├── bin/
-│   └── perf_compare.rs             # 性能对比测试工具
 └── ffi/
     ├── mod.rs                      # 模块声明
     ├── types.rs                    # 公用 C ABI 类型定义
@@ -146,11 +141,6 @@ src/
     ├── bt_release_vec.rs           # 通用 Vec 释放
     ├── winheap.rs                  # Windows 堆内存分配
     └── zlib_touch.rs               # zlib 符号导出
-tests/
-├── abi_compare.rs
-├── commit_graph_smoke.rs
-├── git_repo_compare.rs
-└── zlib_more_compare.rs
 ```
 
 ## 许可证

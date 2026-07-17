@@ -58,8 +58,7 @@ jobs:
         run: cargo build --release --target x86_64-pc-windows-msvc
 
       - name: Smoke-test library unit tests
-        # Integration tests under tests/ require the original biturbo.dll
-        # (not in this repo), so only the lib unit-test harness is run.
+        # Only the lib unit-test harness is run (no integration tests).
         run: cargo test --lib --release --target x86_64-pc-windows-msvc
 
       - name: Verify build output (PE magic + size)
