@@ -254,11 +254,117 @@ fn add_diff_header_path_tokens(
                 dst_start += 2;
             }
             add_token(tokens, 1, line_start + src_start, line_start + sec_q);
-            add_token(tokens, 2, line_start + dst_start, line_start + fourth_q);
-            return true;
-        }
+        add_token(tokens, 2, line_start + dst_start, line_start + fourth_q);
+        return true;
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kinds(tokens: &[BtPatchToken]) -> Vec<u8> {
+        tokens.iter().map(|t| t.kind).collect()
+    }
+
+    #[test]
+    fn diff_header_ab_prefix_splits_src_and_dst() {
+        let line = "diff --git a/foo.txt b/bar.txt";
+        let mut tokens = Vec::new();
+        assert!(add_diff_header_path_tokens(line, 0, "a/", "b/", &mut tokens));
+
+        let src = tokens.iter().find(|t| t.kind == 1).expect("src path token");
+        assert_eq!(&line[src.start as usize..src.end as usize], "foo.txt");
+        let dst = tokens.iter().find(|t| t.kind == 2).expect("dst path token");
+        assert_eq!(&line[dst.start as usize..dst.end as usize], "bar.txt");
+    }
+
+    #[test]
+    fn diff_header_custom_prefix() {
+        let line = "diff --git prefix/foo other/bar";
+        let mut tokens = Vec::new();
+        assert!(add_diff_header_path_tokens(line, 0, "prefix/", "other/", &mut tokens));
+        let src = tokens.iter().find(|t| t.kind == 1).unwrap();
+        assert_eq!(&line[src.start as usize..src.end as usize], "foo");
+        let dst = tokens.iter().find(|t| t.kind == 2).unwrap();
+        assert_eq!(&line[dst.start as usize..dst.end as usize], "bar");
+    }
+
+    #[test]
+    fn diff_header_quoted_paths() {
+        let line = "diff --git \"a/space path.txt\" \"b/space path.txt\"";
+        let mut tokens = Vec::new();
+        assert!(add_diff_header_path_tokens(line, 0, "a/", "b/", &mut tokens));
+        let src = tokens.iter().find(|t| t.kind == 1).unwrap();
+        assert_eq!(&line[src.start as usize..src.end as usize], "space path.txt");
+        let dst = tokens.iter().find(|t| t.kind == 2).unwrap();
+        assert_eq!(&line[dst.start as usize..dst.end as usize], "space path.txt");
+    }
+
+    #[test]
+    fn diff_header_no_match_returns_false() {
+        let line = "not a diff header at all";
+        let mut tokens = Vec::new();
+        assert!(!add_diff_header_path_tokens(line, 0, "a/", "b/", &mut tokens));
+    }
+
+    #[test]
+    fn chunk_header_tokenizes_full_hunk() {
+        let line = "@@ -10,5 +20,7 @@ fn main()";
+        let mut tokens = Vec::new();
+        tokenize_chunk_header(line, 0, line.len(), &mut tokens);
+
+        let ks = kinds(&tokens);
+        assert!(ks.contains(&16), "whole-header token (16) missing");
+        assert_eq!(
+            &line[tokens.iter().find(|t| t.kind == 17).unwrap().start as usize
+                ..tokens.iter().find(|t| t.kind == 17).unwrap().end as usize],
+            "10"
+        );
+        assert_eq!(
+            &line[tokens.iter().find(|t| t.kind == 18).unwrap().start as usize
+                ..tokens.iter().find(|t| t.kind == 18).unwrap().end as usize],
+            "5"
+        );
+        assert_eq!(
+            &line[tokens.iter().find(|t| t.kind == 19).unwrap().start as usize
+                ..tokens.iter().find(|t| t.kind == 19).unwrap().end as usize],
+            "20"
+        );
+        assert_eq!(
+            &line[tokens.iter().find(|t| t.kind == 20).unwrap().start as usize
+                ..tokens.iter().find(|t| t.kind == 20).unwrap().end as usize],
+            "7"
+        );
+        assert_eq!(
+            &line[tokens.iter().find(|t| t.kind == 21).unwrap().start as usize
+                ..tokens.iter().find(|t| t.kind == 21).unwrap().end as usize],
+            "fn main()"
+        );
+    }
+
+    #[test]
+    fn chunk_header_without_counts_omits_len_tokens() {
+        let line = "@@ -1 +1 @@";
+        let mut tokens = Vec::new();
+        tokenize_chunk_header(line, 0, line.len(), &mut tokens);
+        let ks = kinds(&tokens);
+        assert!(ks.contains(&17), "minus start token missing");
+        assert!(ks.contains(&19), "plus start token missing");
+        assert!(!ks.contains(&18), "minus len token should be absent");
+        assert!(!ks.contains(&20), "plus len token should be absent");
+    }
+
+    #[test]
+    fn add_token_records_kind_and_offsets() {
+        let mut tokens = Vec::new();
+        add_token(&mut tokens, 23, 10, 20);
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, 23);
+        assert_eq!(tokens[0].start, 10);
+        assert_eq!(tokens[0].end, 20);
+    }
 }
 

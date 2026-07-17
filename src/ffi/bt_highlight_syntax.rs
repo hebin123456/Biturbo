@@ -158,3 +158,93 @@ fn syntax_style(word: &str, is_c_sharp: bool, is_js_ts: bool, is_rust: bool) -> 
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn syntax_style_empty_returns_none() {
+        assert_eq!(syntax_style("", true, false, false), None);
+        assert_eq!(syntax_style("   ", true, false, false), None);
+    }
+
+    #[test]
+    fn syntax_style_no_language_returns_none() {
+        assert_eq!(syntax_style("anything", false, false, false), None);
+        assert_eq!(syntax_style("public", false, false, false), None);
+    }
+
+    #[test]
+    fn syntax_style_trims_input() {
+        // Whitespace around the word must not defeat matching.
+        assert_eq!(syntax_style(" public ", true, false, false), Some(5));
+        assert_eq!(syntax_style("\tfn\t", false, false, true), Some(2));
+    }
+
+    #[test]
+    fn syntax_style_csharp_modifiers_are_style_5() {
+        for w in ["public", "private", "protected", "internal", "static", "readonly"] {
+            assert_eq!(syntax_style(w, true, false, false), Some(5), "{w} should be style 5");
+        }
+    }
+
+    #[test]
+    fn syntax_style_csharp_types_are_style_3() {
+        for w in ["class", "struct", "enum", "interface", "int", "long", "string", "bool",
+                  "double", "float", "byte", "char", "void", "object", "var"] {
+            assert_eq!(syntax_style(w, true, false, false), Some(3), "{w} should be style 3");
+        }
+    }
+
+    #[test]
+    fn syntax_style_csharp_literals_are_style_7() {
+        for w in ["null", "true", "false"] {
+            assert_eq!(syntax_style(w, true, false, false), Some(7), "{w} should be style 7");
+        }
+    }
+
+    #[test]
+    fn syntax_style_csharp_keywords_are_style_2() {
+        for w in ["using", "namespace", "return", "if", "else", "for", "while", "new"] {
+            assert_eq!(syntax_style(w, true, false, false), Some(2), "{w} should be style 2");
+        }
+    }
+
+    #[test]
+    fn syntax_style_csharp_unknown_returns_none() {
+        assert_eq!(syntax_style("foobar", true, false, false), None);
+        assert_eq!(syntax_style("MyClass", true, false, false), None);
+    }
+
+    #[test]
+    fn syntax_style_rust_types_and_keywords() {
+        assert_eq!(syntax_style("fn", false, false, true), Some(2));
+        assert_eq!(syntax_style("pub", false, false, true), Some(2));
+        assert_eq!(syntax_style("impl", false, false, true), Some(2));
+        assert_eq!(syntax_style("u32", false, false, true), Some(3));
+        assert_eq!(syntax_style("usize", false, false, true), Some(3));
+        assert_eq!(syntax_style("Some", false, false, true), Some(7));
+        assert_eq!(syntax_style("None", false, false, true), Some(7));
+        assert_eq!(syntax_style("my_var", false, false, true), None);
+    }
+
+    #[test]
+    fn syntax_style_js_ts() {
+        assert_eq!(syntax_style("const", false, true, false), Some(2));
+        assert_eq!(syntax_style("import", false, true, false), Some(2));
+        assert_eq!(syntax_style("class", false, true, false), Some(2));
+        assert_eq!(syntax_style("null", false, true, false), Some(7));
+        assert_eq!(syntax_style("undefined", false, true, false), None);
+    }
+
+    #[test]
+    fn syntax_style_language_flags_are_exclusive() {
+        // "class" is a type (3) in C# but a keyword (2) in JS-TS.
+        assert_eq!(syntax_style("class", true, false, false), Some(3));
+        assert_eq!(syntax_style("class", false, true, false), Some(2));
+        // "public" is a modifier (5) in C# but a keyword (2) in JS-TS.
+        assert_eq!(syntax_style("public", true, false, false), Some(5));
+        assert_eq!(syntax_style("public", false, true, false), Some(2));
+    }
+}

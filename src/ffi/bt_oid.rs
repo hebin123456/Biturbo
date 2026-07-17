@@ -57,3 +57,43 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_nibble_decimal_digits() {
+        assert_eq!(hex_nibble(b'0'), Some(0));
+        assert_eq!(hex_nibble(b'9'), Some(9));
+    }
+
+    #[test]
+    fn hex_nibble_lowercase_hex() {
+        assert_eq!(hex_nibble(b'a'), Some(10));
+        assert_eq!(hex_nibble(b'f'), Some(15));
+    }
+
+    #[test]
+    fn hex_nibble_uppercase_hex() {
+        assert_eq!(hex_nibble(b'A'), Some(10));
+        assert_eq!(hex_nibble(b'F'), Some(15));
+    }
+
+    #[test]
+    fn hex_nibble_invalid_chars() {
+        assert_eq!(hex_nibble(b'g'), None);
+        assert_eq!(hex_nibble(b'G'), None);
+        assert_eq!(hex_nibble(b' '), None);
+        assert_eq!(hex_nibble(b'-'), None);
+        assert_eq!(hex_nibble(b':'), None); // char just after '9'
+    }
+
+    #[test]
+    fn hex_nibble_boundary() {
+        // Boundary between decimal and hex ranges
+        assert_eq!(hex_nibble(b'/'), None); // before '0'
+        assert_eq!(hex_nibble(b'`'), None); // before 'a'
+        assert_eq!(hex_nibble(b'@'), None); // before 'A'
+    }
+}
+

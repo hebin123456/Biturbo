@@ -172,3 +172,110 @@ fn decode_tga_to_bmp(data: &[u8], bmp: &mut Vec<u8>) -> bool {
 
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_rejects_too_short_input() {
+        let mut out = Vec::new();
+        assert!(!decode_tga_to_bmp(&[0u8; 10], &mut out));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn decode_rejects_color_mapped_tga() {
+        let mut data = vec![0u8; 18];
+        data[1] = 1; // color map present — unsupported
+        let mut out = Vec::new();
+        assert!(!decode_tga_to_bmp(&data, &mut out));
+    }
+
+    #[test]
+    fn decode_rejects_unsupported_image_type() {
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 0; // no image data
+        let mut out = Vec::new();
+        assert!(!decode_tga_to_bmp(&data, &mut out));
+    }
+
+    #[test]
+    fn decode_rejects_zero_dimensions() {
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 2; // truecolor
+        data[16] = 24;
+        let mut out = Vec::new();
+        assert!(!decode_tga_to_bmp(&data, &mut out));
+    }
+
+    #[test]
+    fn decode_grayscale_2x2_uncompressed() {
+        // image_type=3 (grayscale), 8bpp, 2x2.
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 3;
+        data[12..14].copy_from_slice(&2u16.to_le_bytes());
+        data[14..16].copy_from_slice(&2u16.to_le_bytes());
+        data[16] = 8;
+        data.extend_from_slice(&[10, 20, 30, 40]);
+        let mut out = Vec::new();
+        assert!(decode_tga_to_bmp(&data, &mut out), "grayscale TGA should decode");
+        assert_eq!(&out[0..2], b"BM");
+        // BMP pixel data offset is always 54.
+        assert_eq!(u32::from_le_bytes([out[10], out[11], out[12], out[13]]), 54);
+        // row_stride = ((2*3+3)/4)*4 = 8; pixel_data_size = 8*2 = 16; file_size = 14+40+16 = 70.
+        assert_eq!(u32::from_le_bytes([out[2], out[3], out[4], out[5]]), 70);
+    }
+
+    #[test]
+    fn decode_truecolor_1x1_bottom_origin() {
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 2; // truecolor uncompressed
+        data[12..14].copy_from_slice(&1u16.to_le_bytes());
+        data[14..16].copy_from_slice(&1u16.to_le_bytes());
+        data[16] = 24;
+        data.extend_from_slice(&[0xFF, 0x00, 0x00]); // BGR: blue channel
+        let mut out = Vec::new();
+        assert!(decode_tga_to_bmp(&data, &mut out));
+        assert_eq!(&out[0..2], b"BM");
+        // row_stride = ((1*3+3)/4)*4 = 4; file_size = 14+40+4 = 58.
+        assert_eq!(u32::from_le_bytes([out[2], out[3], out[4], out[5]]), 58);
+        // BMP is bottom-up; with bottom-origin TGA (data[17] & 0x20 == 0) src_y maps 1:1 for 1x1.
+        // Pixel at offset 54 should be the single BGR pixel.
+        assert_eq!(&out[54..57], &[0xFF, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn decode_truecolor_1x1_top_origin_flips_row() {
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 2;
+        data[12..14].copy_from_slice(&1u16.to_le_bytes());
+        data[14..16].copy_from_slice(&1u16.to_le_bytes());
+        data[16] = 24;
+        data[17] = 0x20; // top-origin flag
+        data.extend_from_slice(&[0xFF, 0x00, 0x00]);
+        let mut out = Vec::new();
+        assert!(decode_tga_to_bmp(&data, &mut out));
+        // Top-origin TGA still maps to the single BMP row for 1x1.
+        assert_eq!(&out[54..57], &[0xFF, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn decode_rle_grayscale_truncated_returns_false() {
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 11; // RLE grayscale
+        data[12..14].copy_from_slice(&2u16.to_le_bytes());
+        data[14..16].copy_from_slice(&2u16.to_le_bytes());
+        data[16] = 8;
+        // Truncated payload: header says raw run of 4 but no bytes follow.
+        data.extend_from_slice(&[0x03]); // raw packet, count=4
+        let mut out = Vec::new();
+        assert!(!decode_tga_to_bmp(&data, &mut out));
+    }
+}

@@ -37,6 +37,20 @@
 - **图像解码（`bt_decode_image.rs`）**
   - TGA 解码失败的错误信息改为 `"failed to fill whole buffer"`，与原版输出一致。
 
+### 测试与文档自动化
+
+- **单元测试覆盖**：新增对核心纯函数的单元测试，从原先仅 `bt_layout_treemap` 一个模块扩展到 9 个模块，覆盖：
+  - `BtOid` 字节序/往返（`types.rs`）
+  - `hex_nibble` 十六进制解析边界（`bt_oid.rs`）
+  - `next_legacy_capacity` / `btoid_to_hex` 容量与格式（`bt_commits.rs`）
+  - `legacy_vec_capacity` 进位语义（`bt_process.rs`）
+  - `color_to_name` / `color_from_name` 互转与 TOML 序列化往返、旧字段兼容（`bt_repository_manager.rs`）
+  - `syntax_style` 多语言样式判定（`bt_highlight_syntax.rs`）
+  - `decode_tga_to_bmp` 各类 TGA 编码与异常输入（`bt_decode_image.rs`）
+  - `tokenize_chunk_header` / `add_diff_header_path_tokens` diff 分词（`bt_parse_patch.rs`）
+  - 所有新增测试为纯函数测试，不依赖原版 `biturbo.dll`，随 `cargo test --lib` 在 release 流水线运行。
+- **API 文档自动化**：新增 [`docs.yml`](./.github/workflows/docs.yml) 工作流，推送 `master` 时在 Windows runner 构建 `cargo doc` 并部署到 GitHub Pages，提供在线 API 文档。
+
 ## v1.0.1
 
 首个公开发布版本的基础修复，主要解决 FFI 边界的崩溃与内存安全问题。

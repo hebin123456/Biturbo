@@ -479,3 +479,39 @@ pub unsafe extern "C" fn bt_spawn_with_callback(
 
     0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_vec_capacity_minimum_floor_is_16() {
+        // Matches original DLL: spawn output buffers are never smaller than 16 bytes.
+        assert_eq!(legacy_vec_capacity(0), 16);
+        assert_eq!(legacy_vec_capacity(1), 16);
+        assert_eq!(legacy_vec_capacity(15), 16);
+    }
+
+    #[test]
+    fn legacy_vec_capacity_exact_powers_of_two() {
+        assert_eq!(legacy_vec_capacity(16), 16);
+        assert_eq!(legacy_vec_capacity(32), 32);
+        assert_eq!(legacy_vec_capacity(64), 64);
+        assert_eq!(legacy_vec_capacity(256), 256);
+    }
+
+    #[test]
+    fn legacy_vec_capacity_rounds_up_to_next_power_of_two() {
+        assert_eq!(legacy_vec_capacity(17), 32);
+        assert_eq!(legacy_vec_capacity(33), 64);
+        assert_eq!(legacy_vec_capacity(100), 128);
+        assert_eq!(legacy_vec_capacity(1000), 1024);
+    }
+
+    #[test]
+    fn legacy_vec_capacity_always_ge_input() {
+        for n in [0usize, 1, 7, 16, 17, 100, 1023, 1024, 1025] {
+            assert!(legacy_vec_capacity(n) >= n, "capacity < len for n={n}");
+        }
+    }
+}

@@ -876,3 +876,72 @@ pub unsafe extern "C" fn bt_search_commits(
     }
     BT_OK
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ffi::types::BtOid;
+
+    #[test]
+    fn next_legacy_capacity_zero() {
+        // Original DLL allocates 0 capacity when there is nothing to emit.
+        assert_eq!(next_legacy_capacity(0), 0);
+    }
+
+    #[test]
+    fn next_legacy_capacity_exact_powers_of_two() {
+        assert_eq!(next_legacy_capacity(1), 1);
+        assert_eq!(next_legacy_capacity(2), 2);
+        assert_eq!(next_legacy_capacity(4), 4);
+        assert_eq!(next_legacy_capacity(8), 8);
+        assert_eq!(next_legacy_capacity(16), 16);
+        assert_eq!(next_legacy_capacity(1024), 1024);
+    }
+
+    #[test]
+    fn next_legacy_capacity_rounds_up() {
+        assert_eq!(next_legacy_capacity(3), 4);
+        assert_eq!(next_legacy_capacity(5), 8);
+        assert_eq!(next_legacy_capacity(9), 16);
+        assert_eq!(next_legacy_capacity(17), 32);
+        assert_eq!(next_legacy_capacity(100), 128);
+        assert_eq!(next_legacy_capacity(1000), 1024);
+    }
+
+    #[test]
+    fn btoid_to_hex_zero_oid() {
+        let oid = BtOid { s0: 0, s1: 0, s2: 0, s3: 0, s4: 0 };
+        assert_eq!(btoid_to_hex(&oid), "0000000000000000000000000000000000000000");
+        assert_eq!(btoid_to_hex(&oid).len(), 40);
+    }
+
+    #[test]
+    fn btoid_to_hex_max_oid() {
+        let oid = BtOid {
+            s0: 0xFFFFFFFF,
+            s1: 0xFFFFFFFF,
+            s2: 0xFFFFFFFF,
+            s3: 0xFFFFFFFF,
+            s4: 0xFFFFFFFF,
+        };
+        assert_eq!(btoid_to_hex(&oid), "ffffffffffffffffffffffffffffffffffffffff");
+    }
+
+    #[test]
+    fn btoid_to_hex_known_value() {
+        let oid = BtOid {
+            s0: 0x12345678,
+            s1: 0xabcdef01,
+            s2: 0x00000000,
+            s3: 0x00000000,
+            s4: 0xffffffff,
+        };
+        assert_eq!(btoid_to_hex(&oid), "12345678abcdef010000000000000000ffffffff");
+    }
+
+    #[test]
+    fn btoid_to_hex_is_lowercase() {
+        let oid = BtOid { s0: 0xABCDEF01, s1: 0, s2: 0, s3: 0, s4: 0 };
+        assert_eq!(btoid_to_hex(&oid), "abcdef0100000000000000000000000000000000");
+    }
+}

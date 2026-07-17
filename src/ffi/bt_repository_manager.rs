@@ -521,3 +521,150 @@ pub unsafe extern "C" fn bt_release_repository_manager(p: *mut BtRepositoryManag
         heap_free(repositories_ptr as _);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn color_name_roundtrip() {
+        for c in 1..=6u8 {
+            let name = color_to_name(c).unwrap();
+            assert_eq!(color_from_name(name), c, "color {c} roundtrip failed");
+        }
+    }
+
+    #[test]
+    fn color_to_name_invalid_returns_none() {
+        assert_eq!(color_to_name(0), None);
+        assert_eq!(color_to_name(7), None);
+        assert_eq!(color_to_name(255), None);
+    }
+
+    #[test]
+    fn color_from_name_unknown_returns_zero() {
+        assert_eq!(color_from_name("unknown"), 0);
+        assert_eq!(color_from_name(""), 0);
+    }
+
+    #[test]
+    fn color_names_match_spec() {
+        assert_eq!(color_to_name(1), Some("Red"));
+        assert_eq!(color_to_name(2), Some("Orange"));
+        assert_eq!(color_to_name(3), Some("Yellow"));
+        assert_eq!(color_to_name(4), Some("Green"));
+        assert_eq!(color_to_name(5), Some("Blue"));
+        assert_eq!(color_to_name(6), Some("Violet"));
+    }
+
+    #[test]
+    fn default_scan_depth_is_five() {
+        assert_eq!(default_scan_depth(), 5);
+    }
+
+    #[test]
+    fn is_zero_u32_predicate() {
+        assert!(is_zero_u32(&0));
+        assert!(!is_zero_u32(&1));
+    }
+
+    #[test]
+    fn is_default_color_predicate() {
+        // Valid colors (1..=6) are NOT default; 0 and out-of-range are default (skipped).
+        assert!(is_default_color(&0));
+        assert!(is_default_color(&7));
+        assert!(!is_default_color(&1));
+        assert!(!is_default_color(&6));
+    }
+
+    #[test]
+    fn toml_config_roundtrip_with_color_name() {
+        let config = TomlConfig {
+            source_dirs: vec!["/repo/a".to_string(), "/repo/b".to_string()],
+            scan_depth: 3,
+            ignore: vec!["*.tmp".to_string()],
+            repositories: vec![TomlRepo {
+                path: "/repo/a".to_string(),
+                alias: "a".to_string(),
+                opened: 2,
+                color: 1, // Red
+            }],
+            repositories_compat: Vec::new(),
+        };
+        let toml_str = toml::to_string(&config).unwrap();
+        // Color must serialize as the human-readable name, not the integer.
+        assert!(toml_str.contains("color = \"Red\""), "color not serialized as name: {toml_str}");
+        // Must use singular "repository" table name.
+        assert!(toml_str.contains("[[repository]]"));
+
+        let parsed: TomlConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.source_dirs, config.source_dirs);
+        assert_eq!(parsed.scan_depth, 3);
+        assert_eq!(parsed.ignore, config.ignore);
+        assert_eq!(parsed.repositories.len(), 1);
+        assert_eq!(parsed.repositories[0].path, "/repo/a");
+        assert_eq!(parsed.repositories[0].alias, "a");
+        assert_eq!(parsed.repositories[0].opened, 2);
+        assert_eq!(parsed.repositories[0].color, 1);
+    }
+
+    #[test]
+    fn toml_config_uses_defaults_when_fields_absent() {
+        let toml_str = "source_dirs = []\n";
+        let parsed: TomlConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.scan_depth, 5, "scan_depth should default to 5");
+        assert!(parsed.ignore.is_empty());
+        assert!(parsed.repositories.is_empty());
+    }
+
+    #[test]
+    fn toml_config_reads_legacy_plural_repositories_field() {
+        // Legacy config files used "repositories" (plural); must be read into
+        // repositories_compat so old configs keep working.
+        let toml_str = r#"
+source_dirs = []
+[[repositories]]
+path = "/legacy"
+color = "Blue"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml_str).unwrap();
+        assert!(parsed.repositories.is_empty());
+        assert_eq!(parsed.repositories_compat.len(), 1);
+        assert_eq!(parsed.repositories_compat[0].path, "/legacy");
+        assert_eq!(parsed.repositories_compat[0].color, 5);
+    }
+
+    #[test]
+    fn toml_color_accepts_integer_too() {
+        // deserialize_color accepts both string names and raw integers.
+        let toml_str = r#"
+source_dirs = []
+[[repository]]
+path = "/r"
+color = 3
+"#;
+        let parsed: TomlConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.repositories[0].color, 3);
+    }
+
+    #[test]
+    fn toml_skip_serializing_default_color() {
+        // color=0 (default) must be omitted from output to keep config clean.
+        let config = TomlConfig {
+            source_dirs: vec![],
+            scan_depth: 5,
+            ignore: vec![],
+            repositories: vec![TomlRepo {
+                path: "/r".to_string(),
+                alias: String::new(),
+                opened: 0,
+                color: 0,
+            }],
+            repositories_compat: Vec::new(),
+        };
+        let toml_str = toml::to_string(&config).unwrap();
+        assert!(!toml_str.contains("color"), "default color should be skipped: {toml_str}");
+        assert!(!toml_str.contains("alias"), "empty alias should be skipped");
+        assert!(!toml_str.contains("opened"), "zero opened should be skipped");
+    }
+}
