@@ -76,18 +76,48 @@ fn is_canceled(cancellation_token_ptr: *mut *mut u8) -> bool {
 }
 
 unsafe fn alloc_and_copy_slice<T: Copy>(values: &[T]) -> *mut T {
+    unsafe { alloc_and_copy_slice_with_cap(values, values.len()).0 }
+}
+
+unsafe fn alloc_and_copy_slice_with_cap<T: Copy>(values: &[T], cap: usize) -> (*mut T, usize) {
     if values.is_empty() {
-        return core::ptr::null_mut();
+        return (core::ptr::null_mut(), 0);
     }
-    let bytes = values.len() * std::mem::size_of::<T>();
+    let cap = cap.max(values.len());
+    let bytes = cap * std::mem::size_of::<T>();
     let p = unsafe { heap_alloc(bytes) } as *mut T;
     if p.is_null() {
-        return core::ptr::null_mut();
+        return (core::ptr::null_mut(), 0);
     }
     unsafe {
-        core::ptr::copy_nonoverlapping(values.as_ptr() as *const u8, p as *mut u8, bytes);
+        core::ptr::copy_nonoverlapping(
+            values.as_ptr() as *const u8,
+            p as *mut u8,
+            values.len() * std::mem::size_of::<T>(),
+        );
     }
-    p
+    (p, cap)
+}
+
+fn next_legacy_capacity(len: usize) -> usize {
+    if len == 0 {
+        0
+    } else {
+        len.next_power_of_two()
+    }
+}
+
+fn git_oid_to_btoid(oid: git2::Oid) -> BtOid {
+    let bytes = oid.as_bytes();
+    BtOid::from_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        bytes[16], bytes[17], bytes[18], bytes[19],
+    ])
+}
+
+fn btoid_to_hex(oid: &BtOid) -> String {
+    format!("{:08x}{:08x}{:08x}{:08x}{:08x}", oid.s0, oid.s1, oid.s2, oid.s3, oid.s4)
 }
 
 #[no_mangle]
@@ -121,21 +151,15 @@ pub unsafe extern "C" fn bt_release_commit_storage(r: *mut BtCommitStorage) {
         return;
     }
     unsafe {
-        let oids_ptr = std::ptr::replace(&mut (*r).oids, core::ptr::null_mut());
-        (*r).oids_len = 0;
-        (*r).oids_cap = 0;
+        let oids_ptr = (*r).oids;
         if !oids_ptr.is_null() {
             heap_free(oids_ptr as *mut c_void);
         }
 
-        let indexes_ptr = std::ptr::replace(&mut (*r).indexes, core::ptr::null_mut());
-        (*r).indexes_len = 0;
-        (*r).indexes_cap = 0;
+        let indexes_ptr = (*r).indexes;
         if !indexes_ptr.is_null() {
             heap_free(indexes_ptr as *mut c_void);
         }
-
-        (*r).has_more = 0;
     }
 }
 
@@ -184,7 +208,6 @@ fn get_commit_edges(
 struct CommitRecord {
     oid: BtOid,
     parents: Vec<BtOid>,
-    time: i64,
 }
 
 fn build_commit_storage_native(
@@ -219,7 +242,6 @@ fn build_commit_storage_native(
         records.push(CommitRecord {
             oid,
             parents: edges.parents.clone(),
-            time: edges.author_time,
         });
 
         // PUSH PARENTS IN REVERSE ORDER TO MATCH STACK LIFO (visiting first parent first!)
@@ -252,40 +274,6 @@ fn build_commit_storage_native(
     true
 }
 
-#[derive(PartialEq, Eq)]
-struct ReadyItem {
-    index: usize,
-    priority: i64,
-    time: i64,
-    oid: BtOid,
-}
-
-impl Ord for ReadyItem {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        let cmp_prio = self.priority.cmp(&other.priority);
-        if cmp_prio != std::cmp::Ordering::Equal {
-            return cmp_prio;
-        }
-        let cmp_time = self.time.cmp(&other.time);
-        if cmp_time != std::cmp::Ordering::Equal {
-            return cmp_time;
-        }
-        if self.oid == other.oid {
-            std::cmp::Ordering::Equal
-        } else if self.oid < other.oid {
-            std::cmp::Ordering::Greater // SMALLER OID gets HIGHER priority in BinaryHeap
-        } else {
-            std::cmp::Ordering::Less
-        }
-    }
-}
-
-impl PartialOrd for ReadyItem {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 fn build_commit_storage_priority_native(
     repo: &git2::Repository,
     tips: &[BtOid],
@@ -297,58 +285,19 @@ fn build_commit_storage_priority_native(
     indexes: &mut Vec<u32>,
     hit_limit: &mut bool,
 ) -> bool {
-    let mut record_indexes = HashMap::new();
-    let mut records = Vec::new();
-    let mut stack = tips.to_vec();
     *hit_limit = false;
-
-    while let Some(oid) = stack.pop() {
-        if is_canceled(cancellation_token_ptr) {
-            set_last_error_str("Canceled");
+    let mut walk = match repo.revwalk() {
+        Ok(walk) => walk,
+        Err(e) => {
+            set_last_error_str(&format!("failed to create revwalk: {e}"));
             return false;
         }
-        if record_indexes.contains_key(&oid) {
-            continue;
-        }
-        let Some(edges) = get_commit_edges(repo, oid, cache) else {
-            continue;
-        };
-        record_indexes.insert(oid, records.len());
-        records.push(CommitRecord {
-            oid,
-            parents: edges.parents.clone(),
-            time: edges.author_time,
-        });
-
-        // PUSH PARENTS IN REVERSE ORDER TO MATCH STACK LIFO (visiting first parent first!)
-        for &parent in edges.parents.iter().rev() {
-            if !record_indexes.contains_key(&parent) {
-                stack.push(parent);
-            }
-        }
-    }
-
-    let mut remaining_children = vec![0u32; records.len()];
-    for record in &records {
-        for &parent in &record.parents {
-            if let Some(&parent_idx) = record_indexes.get(&parent) {
-                remaining_children[parent_idx] += 1;
-            }
-        }
-    }
-
-    let mut ready = std::collections::BinaryHeap::new();
-    let mut emitted = vec![0u8; records.len()];
-    let mut continuation_priority = vec![0i64; records.len()];
-
-    for i in 0..records.len() {
-        if remaining_children[i] == 0 {
-            ready.push(ReadyItem {
-                index: i,
-                priority: 0,
-                time: records[i].time,
-                oid: records[i].oid,
-            });
+    };
+    let _ = walk.set_sorting(git2::Sort::TOPOLOGICAL);
+    for &tip in tips {
+        let raw_oid = tip.to_bytes();
+        if let Ok(git_oid) = git2::Oid::from_bytes(&raw_oid) {
+            let _ = walk.push(git_oid);
         }
     }
 
@@ -360,53 +309,45 @@ fn build_commit_storage_priority_native(
         usize::MAX
     };
 
-    while let Some(item) = ready.pop() {
+    for oid_result in walk {
         if is_canceled(cancellation_token_ptr) {
             set_last_error_str("Canceled");
             return false;
         }
-        let record_index = item.index;
-        if emitted[record_index] != 0 {
-            continue;
-        }
-        emitted[record_index] = 1;
-
-        let record = &records[record_index];
-        if emitted_count >= start && emitted_count < end_limit {
-            indexes.push(flat.len() as u32);
-            flat.push(record.oid);
-            for &parent in &record.parents {
-                flat.push(parent);
-            }
-        }
-        emitted_count += 1;
-        if emitted_count > end_limit {
+        if emitted_count >= end_limit {
             *hit_limit = true;
             break;
         }
-
-        let mut parent_position = 0i64;
-        for &parent in &record.parents {
-            if let Some(&parent_index) = record_indexes.get(&parent) {
-                if remaining_children[parent_index] > 0 {
-                    remaining_children[parent_index] -= 1;
-                    if remaining_children[parent_index] == 0 {
-                        // Formula from C++ biturbo.cpp
-                        continuation_priority[parent_index] = (records.len() - emitted_count) as i64 * 16 - parent_position;
-                        ready.push(ReadyItem {
-                            index: parent_index,
-                            priority: continuation_priority[parent_index],
-                            time: records[parent_index].time,
-                            oid: records[parent_index].oid,
-                        });
-                    }
+        let oid = match oid_result {
+            Ok(oid) => oid,
+            Err(_) => continue,
+        };
+        let commit = match repo.find_commit(oid) {
+            Ok(commit) => commit,
+            Err(_) => continue,
+        };
+        if emitted_count >= start {
+            let btoid = git_oid_to_btoid(oid);
+            indexes.push(flat.len() as u32);
+            flat.push(btoid);
+            let mut parents = Vec::with_capacity(commit.parent_count());
+            for i in 0..commit.parent_count() {
+                if let Ok(parent_id) = commit.parent_id(i) {
+                    let parent = git_oid_to_btoid(parent_id);
+                    flat.push(parent);
+                    parents.push(parent);
                 }
             }
-            parent_position += 1;
+            if let Ok(mut lock) = cache.lock() {
+                lock.entry(btoid).or_insert_with(|| CommitEdges {
+                    parents,
+                    author_time: commit.author().when().seconds(),
+                });
+            }
         }
+        emitted_count += 1;
     }
 
-    *hit_limit = *hit_limit || emitted_count < records.len();
     true
 }
 
@@ -475,11 +416,17 @@ pub unsafe extern "C" fn bt_get_commits(
         unsafe { std::slice::from_raw_parts(required_oids_ptr, required_oids_len as usize) }
     };
 
-    let mut combined_tips = tips.to_vec();
-    combined_tips.extend_from_slice(required);
+    let has_required = !required.is_empty();
+    let combined_tips = if tips.is_empty() {
+        required.to_vec()
+    } else {
+        tips.to_vec()
+    };
 
     let mut max_count = page_size.saturating_mul(std::cmp::max(1, min_pages));
-    if max_count <= 0 {
+    if has_required {
+        max_count = 0;
+    } else if max_count <= 0 {
         max_count = 10000;
     }
     let skip_count = if page_size > 0 && skip_pages > 0 {
@@ -500,7 +447,7 @@ pub unsafe extern "C" fn bt_get_commits(
     let mut indexes = Vec::new();
     let mut hit_limit = false;
 
-    let success = if combined_tips.len() <= 1 {
+    let success = if combined_tips.len() <= 1 && !has_required {
         build_commit_storage_native(
             &repo,
             &combined_tips,
@@ -531,12 +478,21 @@ pub unsafe extern "C" fn bt_get_commits(
         return BT_ERR;
     }
 
-    let oids_ptr = unsafe { alloc_and_copy_slice(&flat) };
+    let (oids_cap_target, indexes_cap_target) = if has_required {
+        (next_legacy_capacity(flat.len()), next_legacy_capacity(indexes.len()))
+    } else if combined_tips.len() > 1 {
+        let page_cap = usize::try_from(max_count).unwrap_or(0);
+        (page_cap.max(flat.len()), page_cap.max(indexes.len()))
+    } else {
+        (flat.len(), indexes.len())
+    };
+
+    let (oids_ptr, oids_cap) = unsafe { alloc_and_copy_slice_with_cap(&flat, oids_cap_target) };
     if !flat.is_empty() && oids_ptr.is_null() {
         set_last_error_str("insufficient memory");
         return BT_ERR;
     }
-    let indexes_ptr = unsafe { alloc_and_copy_slice(&indexes) };
+    let (indexes_ptr, indexes_cap) = unsafe { alloc_and_copy_slice_with_cap(&indexes, indexes_cap_target) };
     if !indexes.is_empty() && indexes_ptr.is_null() {
         if !oids_ptr.is_null() {
             unsafe { heap_free(oids_ptr as *mut c_void) };
@@ -548,10 +504,10 @@ pub unsafe extern "C" fn bt_get_commits(
     unsafe {
         (*out_result).oids = oids_ptr;
         (*out_result).oids_len = flat.len() as i64;
-        (*out_result).oids_cap = flat.len() as i64;
+        (*out_result).oids_cap = oids_cap as i64;
         (*out_result).indexes = indexes_ptr;
         (*out_result).indexes_len = indexes.len() as i64;
-        (*out_result).indexes_cap = indexes.len() as i64;
+        (*out_result).indexes_cap = indexes_cap as i64;
         (*out_result).has_more = if hit_limit { 1 } else { 0 };
     }
 
@@ -569,22 +525,8 @@ pub unsafe extern "C" fn bt_get_commit_subgraph(
         set_last_error_str("bt_get_commit_subgraph: oid is null");
         return BT_ERR;
     }
-    unsafe {
-        bt_get_commits(
-            git_dir_path,
-            oid,
-            1,
-            0,
-            10000,
-            0,
-            1,
-            core::ptr::null(),
-            0,
-            cache,
-            core::ptr::null_mut(),
-            out_result,
-        )
-    }
+    let tip = unsafe { *oid };
+    get_commit_subgraph_date_order(git_dir_path, &[tip], None, cache, out_result)
 }
 
 #[no_mangle]
@@ -599,23 +541,123 @@ pub unsafe extern "C" fn bt_get_commit_subgraph_2(
         set_last_error_str("bt_get_commit_subgraph_2: invalid arguments");
         return BT_ERR;
     }
-    let tips = [unsafe { *dst }, unsafe { *src }];
-    unsafe {
-        bt_get_commits(
-            git_dir_path,
-            tips.as_ptr(),
-            2,
-            0,
-            10000,
-            0,
-            1,
-            core::ptr::null(),
-            0,
-            cache,
-            core::ptr::null_mut(),
-            out_result,
-        )
+    let src_oid = unsafe { *src };
+    let dst_oid = unsafe { *dst };
+    get_commit_subgraph_date_order(git_dir_path, &[dst_oid], Some(src_oid), cache, out_result)
+}
+
+fn get_commit_subgraph_date_order(
+    git_dir_path: *const c_char,
+    tips: &[BtOid],
+    stop_after: Option<BtOid>,
+    cache_handle: *mut *mut c_void,
+    out_result: *mut BtCommitStorage,
+) -> c_int {
+    if out_result.is_null() {
+        set_last_error_str("bt_get_commit_subgraph: out_result is null");
+        return BT_ERR;
     }
+    unsafe {
+        (*out_result).oids = core::ptr::null_mut();
+        (*out_result).oids_len = 0;
+        (*out_result).oids_cap = 0;
+        (*out_result).indexes = core::ptr::null_mut();
+        (*out_result).indexes_len = 0;
+        (*out_result).indexes_cap = 0;
+        (*out_result).has_more = 0;
+    }
+
+    let git_dir_str = match cstr_to_utf8(git_dir_path, "bt_get_commit_subgraph: git_dir_path") {
+        Ok(s) => s,
+        Err(rc) => return rc,
+    };
+    let repo = match git2::Repository::open(Path::new(git_dir_str)) {
+        Ok(r) => r,
+        Err(e) => {
+            set_last_error_str(&format!("failed to open repository: {e}"));
+            return BT_ERR;
+        }
+    };
+    let local_cache = Mutex::new(HashMap::new());
+    let cache = if !cache_handle.is_null() && !unsafe { *cache_handle }.is_null() {
+        unsafe { &(*(*cache_handle as *const Cache)).commit_edges_cache }
+    } else {
+        &local_cache
+    };
+
+    let mut walk = match repo.revwalk() {
+        Ok(walk) => walk,
+        Err(e) => {
+            set_last_error_str(&format!("failed to create revwalk: {e}"));
+            return BT_ERR;
+        }
+    };
+    let _ = walk.set_sorting(git2::Sort::TIME);
+    for tip in tips {
+        if let Ok(git_oid) = git2::Oid::from_bytes(&tip.to_bytes()) {
+            let _ = walk.push(git_oid);
+        }
+    }
+
+    let mut flat = Vec::new();
+    let mut indexes = Vec::new();
+    for oid_result in walk {
+        let Ok(oid) = oid_result else {
+            continue;
+        };
+        let Ok(commit) = repo.find_commit(oid) else {
+            continue;
+        };
+        let btoid = git_oid_to_btoid(oid);
+        let mut parents = Vec::with_capacity(commit.parent_count());
+        for i in 0..commit.parent_count() {
+            if let Ok(parent_id) = commit.parent_id(i) {
+                parents.push(git_oid_to_btoid(parent_id));
+            }
+        }
+        if let Ok(mut lock) = cache.lock() {
+            lock.entry(btoid).or_insert_with(|| CommitEdges {
+                parents: parents.clone(),
+                author_time: commit.author().when().seconds(),
+            });
+        }
+        if !parents.is_empty() {
+            indexes.push(flat.len() as u32);
+            flat.push(btoid);
+            flat.extend_from_slice(&parents);
+        }
+        if stop_after == Some(btoid) {
+            break;
+        }
+    }
+
+    let (oids_ptr, oids_cap) = unsafe {
+        alloc_and_copy_slice_with_cap(&flat, next_legacy_capacity(flat.len()))
+    };
+    if !flat.is_empty() && oids_ptr.is_null() {
+        set_last_error_str("insufficient memory");
+        return BT_ERR;
+    }
+    let (indexes_ptr, indexes_cap) = unsafe {
+        alloc_and_copy_slice_with_cap(&indexes, next_legacy_capacity(indexes.len()))
+    };
+    if !indexes.is_empty() && indexes_ptr.is_null() {
+        if !oids_ptr.is_null() {
+            unsafe { heap_free(oids_ptr as *mut c_void) };
+        }
+        set_last_error_str("insufficient memory");
+        return BT_ERR;
+    }
+    unsafe {
+        (*out_result).oids = oids_ptr;
+        (*out_result).oids_len = flat.len() as i64;
+        (*out_result).oids_cap = oids_cap as i64;
+        (*out_result).indexes = indexes_ptr;
+        (*out_result).indexes_len = indexes.len() as i64;
+        (*out_result).indexes_cap = indexes_cap as i64;
+        (*out_result).has_more = 0;
+    }
+    BT_OK
 }
 
 #[no_mangle]
@@ -814,7 +856,8 @@ pub unsafe extern "C" fn bt_search_commits(
         if let Ok(git2_oid) = git2::Oid::from_bytes(&raw_oid) {
             if let Ok(commit) = repo.find_commit(git2_oid) {
                 let msg = commit.message().unwrap_or("").to_ascii_lowercase();
-                if needle.is_empty() || msg.contains(&needle) {
+                let oid_hex = btoid_to_hex(oid);
+                if needle.is_empty() || msg.contains(&needle) || oid_hex.contains(&needle) {
                     matches.push(*oid);
                 }
             }

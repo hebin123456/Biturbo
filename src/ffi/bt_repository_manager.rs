@@ -1,6 +1,6 @@
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::winheap::{heap_alloc, heap_alloc_c_string, heap_free};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::path::PathBuf;
@@ -30,20 +30,107 @@ pub struct BtRepositoryManager {
 #[derive(Serialize, Deserialize)]
 struct TomlRepo {
     path: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     alias: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
     opened: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_color", serialize_with = "serialize_color", skip_serializing_if = "is_default_color")]
     color: u8,
 }
 
 #[derive(Serialize, Deserialize)]
 struct TomlConfig {
+    #[serde(default)]
     source_dirs: Vec<String>,
+    #[serde(default = "default_scan_depth")]
     scan_depth: u8,
+    #[serde(default)]
     ignore: Vec<String>,
+    #[serde(default, rename = "repository")]
     repositories: Vec<TomlRepo>,
+    #[serde(default, rename = "repositories", skip_serializing)]
+    repositories_compat: Vec<TomlRepo>,
+}
+
+fn default_scan_depth() -> u8 {
+    5
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
+fn is_default_color(v: &u8) -> bool {
+    color_to_name(*v).is_none()
+}
+
+fn color_to_name(color: u8) -> Option<&'static str> {
+    match color {
+        1 => Some("Red"),
+        2 => Some("Orange"),
+        3 => Some("Yellow"),
+        4 => Some("Green"),
+        5 => Some("Blue"),
+        6 => Some("Violet"),
+        _ => None,
+    }
+}
+
+fn color_from_name(name: &str) -> u8 {
+    match name {
+        "Red" => 1,
+        "Orange" => 2,
+        "Yellow" => 3,
+        "Green" => 4,
+        "Blue" => 5,
+        "Violet" => 6,
+        _ => 0,
+    }
+}
+
+fn serialize_color<S>(color: &u8, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(color_to_name(*color).unwrap_or(""))
+}
+
+fn deserialize_color<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct ColorVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for ColorVisitor {
+        type Value = u8;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a repository color string or integer")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(color_from_name(value))
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value as u8)
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(value.max(0) as u8)
+        }
+    }
+
+    deserializer.deserialize_any(ColorVisitor)
 }
 
 #[no_mangle]
@@ -179,7 +266,13 @@ pub unsafe extern "C" fn bt_get_repository_manager(
 
     // 3. Allocate repositories
     let mut repos: Vec<BtRepositoryManagerRepository> = Vec::new();
-    for repo in &config.repositories {
+    let repositories = if config.repositories.is_empty() {
+        &config.repositories_compat
+    } else {
+        &config.repositories
+    };
+
+    for repo in repositories {
         let path_p = unsafe { heap_alloc_c_string(&repo.path) };
         let alias_p = if repo.alias.is_empty() {
             core::ptr::null_mut()
@@ -356,6 +449,7 @@ pub unsafe extern "C" fn bt_save_repository_manager(
         scan_depth,
         ignore,
         repositories,
+        repositories_compat: Vec::new(),
     };
 
     let serialized = match toml::to_string(&config) {

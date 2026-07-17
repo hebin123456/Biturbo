@@ -18,6 +18,21 @@ fn get_active_process_tokens() -> &'static Mutex<HashSet<usize>> {
     ACTIVE_PROCESS_TOKENS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+fn legacy_vec_capacity(len: usize) -> usize {
+    len.next_power_of_two().max(16)
+}
+
+unsafe fn heap_alloc_legacy_output(bytes: &[u8]) -> (*mut u8, usize) {
+    let cap = legacy_vec_capacity(bytes.len());
+    let ptr = unsafe { heap_alloc(cap) };
+    if !ptr.is_null() && !bytes.is_empty() {
+        unsafe {
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
+        }
+    }
+    (ptr, cap)
+}
+
 // Callback signature for bt_spawn_with_callback
 pub type ReadLineCallback = unsafe extern "C" fn(
     cb_target_ptr: *mut c_void,
@@ -212,24 +227,25 @@ pub unsafe extern "C" fn bt_spawn_with_output(
         }
     };
 
-    // Copy stdout to process heap
     let stdout_len = output.stdout.len();
-    let stdout_ptr = unsafe { heap_alloc(stdout_len) };
-    if !stdout_ptr.is_null() && stdout_len > 0 {
-        core::ptr::copy_nonoverlapping(output.stdout.as_ptr(), stdout_ptr, stdout_len);
+    let (stdout_ptr, stdout_cap) = unsafe { heap_alloc_legacy_output(&output.stdout) };
+    if stdout_ptr.is_null() {
+        set_last_error_str("insufficient memory");
+        return 1;
     }
 
-    // Copy stderr to process heap
     let stderr_len = output.stderr.len();
-    let stderr_ptr = unsafe { heap_alloc(stderr_len) };
-    if !stderr_ptr.is_null() && stderr_len > 0 {
-        core::ptr::copy_nonoverlapping(output.stderr.as_ptr(), stderr_ptr, stderr_len);
+    let (stderr_ptr, stderr_cap) = unsafe { heap_alloc_legacy_output(&output.stderr) };
+    if stderr_ptr.is_null() {
+        unsafe { heap_free(stdout_ptr as _) };
+        set_last_error_str("insufficient memory");
+        return 1;
     }
 
     unsafe {
         (*out_result).status = output.status.code().unwrap_or(0);
-        (*out_result).stdout = BtBuf { ptr: stdout_ptr as _, len: stdout_len, cap: stdout_len };
-        (*out_result).stderr = BtBuf { ptr: stderr_ptr as _, len: stderr_len, cap: stderr_len };
+        (*out_result).stdout = BtBuf { ptr: stdout_ptr as _, len: stdout_len, cap: stdout_cap };
+        (*out_result).stderr = BtBuf { ptr: stderr_ptr as _, len: stderr_len, cap: stderr_cap };
     }
 
     0

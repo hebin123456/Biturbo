@@ -33,7 +33,7 @@ pub unsafe extern "C" fn bt_decode_image(
     // Decode TGA to BMP
     let mut bmp_bytes = Vec::new();
     if !decode_tga_to_bmp(data, &mut bmp_bytes) {
-        set_last_error_str("Unsupported image format");
+        set_last_error_str("failed to fill whole buffer");
         return 1;
     }
 

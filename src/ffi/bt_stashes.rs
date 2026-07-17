@@ -199,22 +199,18 @@ pub unsafe extern "C" fn bt_release_repository_stashes(p: *mut BtRepositoryStash
     if p.is_null() {
         return;
     }
-    let stashes_ptr = std::ptr::replace(&mut (*p).stashes, core::ptr::null_mut());
+    let stashes_ptr = (*p).stashes;
     let stashes_len = (*p).stashes_len;
     let stashes_cap = (*p).stashes_cap;
-    (*p).stashes_len = 0;
-    (*p).stashes_cap = 0;
 
-    let identities_ptr = std::ptr::replace(&mut (*p).identities, core::ptr::null_mut());
+    let identities_ptr = (*p).identities;
     let identities_len = (*p).identities_len;
     let identities_cap = (*p).identities_cap;
-    (*p).identities_len = 0;
-    (*p).identities_cap = 0;
 
     if !stashes_ptr.is_null() {
         for i in 0..stashes_len {
             let s = &mut *stashes_ptr.add(i as usize);
-            let s_subject = std::ptr::replace(&mut s.subject, core::ptr::null_mut());
+            let s_subject = s.subject;
             if !s_subject.is_null() {
                 heap_free(s_subject as _);
             }
@@ -227,11 +223,11 @@ pub unsafe extern "C" fn bt_release_repository_stashes(p: *mut BtRepositoryStash
     if !identities_ptr.is_null() {
         for i in 0..identities_len {
             let id = &mut *identities_ptr.add(i as usize);
-            let id_name = std::ptr::replace(&mut id.name, core::ptr::null_mut());
+            let id_name = id.name;
             if !id_name.is_null() {
                 heap_free(id_name as _);
             }
-            let id_email = std::ptr::replace(&mut id.email, core::ptr::null_mut());
+            let id_email = id.email;
             if !id_email.is_null() {
                 heap_free(id_email as _);
             }

@@ -114,11 +114,10 @@ pub unsafe extern "C" fn bt_release_tag_details(p: *mut BtTagDetails) {
         return;
     }
     unsafe {
-        let tagger_name = std::ptr::replace(&mut (*p).tagger_name, core::ptr::null_mut());
-        let tagger_email = std::ptr::replace(&mut (*p).tagger_email, core::ptr::null_mut());
-        let name = std::ptr::replace(&mut (*p).name, core::ptr::null_mut());
-        let message = std::ptr::replace(&mut (*p).message, core::ptr::null_mut());
-        (*p).tagger_time = 0;
+        let tagger_name = (*p).tagger_name;
+        let tagger_email = (*p).tagger_email;
+        let name = (*p).name;
+        let message = (*p).message;
 
         if !tagger_name.is_null() {
             heap_free(tagger_name as _);

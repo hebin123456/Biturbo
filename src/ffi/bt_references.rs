@@ -1,8 +1,9 @@
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::types::{BtBuf, BtReferences, BtOid};
 use crate::ffi::winheap::{heap_alloc, heap_free};
-use std::collections::BTreeMap;
+use std::collections::{hash_map::DefaultHasher, BTreeMap};
 use std::ffi::CStr;
+use std::hash::Hasher;
 use std::os::raw::{c_char, c_int};
 use std::path::{Path, PathBuf};
 
@@ -168,40 +169,71 @@ pub unsafe extern "C" fn bt_get_references(
         oids.push(oid);
     }
 
-    if !assign_bytes(unsafe { &mut (*out_refs).a }, &names_data) ||
-       !assign_vector(unsafe { &mut (*out_refs).b }, &name_offsets) ||
-       !assign_vector(unsafe { &mut (*out_refs).c }, &oids) ||
-       !assign_bytes(unsafe { &mut (*out_refs).d }, &symrefs_data) ||
-       !assign_vector(unsafe { &mut (*out_refs).e }, &symref_offsets) {
+    if !assign_bytes(unsafe { &mut (*out_refs).a }, &names_data, names_data.capacity()) ||
+       !assign_vector(unsafe { &mut (*out_refs).b }, &name_offsets, name_offsets.capacity()) ||
+       !assign_vector(unsafe { &mut (*out_refs).c }, &oids, oids.capacity()) ||
+       !assign_bytes(unsafe { &mut (*out_refs).d }, &symrefs_data, symrefs_data.capacity()) ||
+       !assign_vector(unsafe { &mut (*out_refs).e }, &symref_offsets, symref_offsets.capacity()) {
         bt_release_references(out_refs);
         set_last_error_str("insufficient memory");
         return 1;
     }
 
-    // Compute FNV-1a Hash
-    let mut hash_data = Vec::with_capacity(names_data.len() + symrefs_data.len() + oids.len() * 20);
-    hash_data.extend_from_slice(names_data.as_bytes());
-    for oid in &oids {
-        hash_data.extend_from_slice(&oid.to_bytes());
-    }
-    hash_data.extend_from_slice(symrefs_data.as_bytes());
     unsafe {
-        (*out_refs).hash = fnv1a(&hash_data);
+        (*out_refs).hash = legacy_reference_hash(&repo, &refs, include_tags);
     }
 
     0
 }
 
-fn fnv1a(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 1469598103934665603;
-    for &ch in bytes {
-        hash ^= ch as u64;
-        hash = hash.wrapping_mul(1099511628211);
+fn legacy_reference_hash(
+    repo: &git2::Repository,
+    refs: &BTreeMap<String, NativeRefEntry>,
+    include_tags: u8,
+) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    let entries = refs
+        .values()
+        .filter(|entry| entry.name != "FETCH_HEAD" && entry.name != "MERGE_HEAD")
+        .collect::<Vec<_>>();
+    write_usize(&mut hasher, entries.len());
+    for entry in entries {
+        write_len_prefixed_bytes(&mut hasher, entry.name.as_bytes());
+        if entry.symref.is_empty() {
+            write_u64(&mut hasher, 0);
+            let oid = if entry.name.starts_with("refs/tags/") {
+                if entry.has_peeled_oid {
+                    entry.peeled_oid
+                } else {
+                    peel_tag_object(repo, entry.oid)
+                }
+            } else {
+                entry.oid
+            };
+            hasher.write(&oid.to_bytes());
+        } else {
+            write_u64(&mut hasher, 1);
+            write_len_prefixed_bytes(&mut hasher, entry.symref.as_bytes());
+        }
     }
-    hash
+    hasher.write(&[include_tags]);
+    hasher.finish()
 }
 
-unsafe fn assign_bytes(buf: &mut BtBuf, data: &str) -> bool {
+fn write_len_prefixed_bytes(hasher: &mut DefaultHasher, bytes: &[u8]) {
+    write_usize(hasher, bytes.len());
+    hasher.write(bytes);
+}
+
+fn write_usize(hasher: &mut DefaultHasher, value: usize) {
+    hasher.write(&value.to_ne_bytes());
+}
+
+fn write_u64(hasher: &mut DefaultHasher, value: u64) {
+    hasher.write(&value.to_ne_bytes());
+}
+
+unsafe fn assign_bytes(buf: &mut BtBuf, data: &str, cap: usize) -> bool {
     if data.is_empty() {
         buf.ptr = core::ptr::null_mut();
         buf.len = 0;
@@ -209,33 +241,39 @@ unsafe fn assign_bytes(buf: &mut BtBuf, data: &str) -> bool {
         return true;
     }
     let bytes = data.as_bytes();
-    let ptr = heap_alloc(bytes.len());
+    let cap = cap.max(bytes.len());
+    let ptr = heap_alloc(cap);
     if ptr.is_null() {
         return false;
     }
     core::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, bytes.len());
     buf.ptr = ptr as *mut _;
     buf.len = bytes.len();
-    buf.cap = bytes.len();
+    buf.cap = cap;
     true
 }
 
-unsafe fn assign_vector<T: Copy>(buf: &mut BtBuf, values: &[T]) -> bool {
+unsafe fn assign_vector<T: Copy>(buf: &mut BtBuf, values: &[T], cap: usize) -> bool {
     if values.is_empty() {
         buf.ptr = core::ptr::null_mut();
         buf.len = 0;
         buf.cap = 0;
         return true;
     }
-    let bytes_len = values.len() * std::mem::size_of::<T>();
+    let cap = cap.max(values.len());
+    let bytes_len = cap * std::mem::size_of::<T>();
     let ptr = heap_alloc(bytes_len);
     if ptr.is_null() {
         return false;
     }
-    core::ptr::copy_nonoverlapping(values.as_ptr() as *const u8, ptr, bytes_len);
+    core::ptr::copy_nonoverlapping(
+        values.as_ptr() as *const u8,
+        ptr,
+        values.len() * std::mem::size_of::<T>(),
+    );
     buf.ptr = ptr as *mut _;
     buf.len = values.len();
-    buf.cap = values.len();
+    buf.cap = cap;
     true
 }
 
@@ -408,40 +446,28 @@ pub unsafe extern "C" fn bt_release_references(p: *mut BtReferences) {
         return;
     }
     
-    let a_ptr = std::ptr::replace(&mut (*p).a.ptr, core::ptr::null_mut());
-    (*p).a.cap = 0;
-    (*p).a.len = 0;
+    let a_ptr = (*p).a.ptr;
     if !a_ptr.is_null() {
         heap_free(a_ptr);
     }
 
-    let b_ptr = std::ptr::replace(&mut (*p).b.ptr, core::ptr::null_mut());
-    (*p).b.cap = 0;
-    (*p).b.len = 0;
+    let b_ptr = (*p).b.ptr;
     if !b_ptr.is_null() {
         heap_free(b_ptr);
     }
 
-    let c_ptr = std::ptr::replace(&mut (*p).c.ptr, core::ptr::null_mut());
-    (*p).c.cap = 0;
-    (*p).c.len = 0;
+    let c_ptr = (*p).c.ptr;
     if !c_ptr.is_null() {
         heap_free(c_ptr);
     }
 
-    let d_ptr = std::ptr::replace(&mut (*p).d.ptr, core::ptr::null_mut());
-    (*p).d.cap = 0;
-    (*p).d.len = 0;
+    let d_ptr = (*p).d.ptr;
     if !d_ptr.is_null() {
         heap_free(d_ptr);
     }
 
-    let e_ptr = std::ptr::replace(&mut (*p).e.ptr, core::ptr::null_mut());
-    (*p).e.cap = 0;
-    (*p).e.len = 0;
+    let e_ptr = (*p).e.ptr;
     if !e_ptr.is_null() {
         heap_free(e_ptr);
     }
-
-    (*p).hash = 0;
 }

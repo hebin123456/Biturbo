@@ -86,23 +86,16 @@ pub unsafe extern "C" fn bt_highlight_syntax(
                 range_utf16: range,
                 style: 1,
             });
-        } else if is_keyword(&text, is_c_sharp || is_js_ts || is_rust) {
-            // Style 2: SyntaxKeyword
+        } else if let Some(style) = syntax_style(&text, is_c_sharp, is_js_ts, is_rust) {
             highlighted.push(BtHighlighedRange {
                 range_utf16: range,
-                style: 2,
+                style,
             });
         } else if text.chars().next().unwrap_or(' ').is_numeric() {
             // Style 8: SyntaxNumber
             highlighted.push(BtHighlighedRange {
                 range_utf16: range,
                 style: 8,
-            });
-        } else if is_type_name(&text) {
-            // Style 3: SyntaxType
-            highlighted.push(BtHighlighedRange {
-                range_utf16: range,
-                style: 3,
             });
         }
     }
@@ -127,25 +120,41 @@ pub unsafe extern "C" fn bt_highlight_syntax(
     0
 }
 
-fn is_keyword(word: &str, is_source: bool) -> bool {
-    if !is_source { return false; }
-    match word.trim() {
-        "using" | "namespace" | "class" | "struct" | "public" | "private" | "protected" | "internal" |
-        "static" | "readonly" | "fn" | "let" | "mut" | "use" | "mod" | "pub" | "impl" | "import" |
-        "from" | "const" | "var" | "if" | "else" | "for" | "while" | "return" | "new" | "null" | "true" | "false" => true,
-        _ => false,
-    }
-}
-
-fn is_type_name(word: &str) -> bool {
+fn syntax_style(word: &str, is_c_sharp: bool, is_js_ts: bool, is_rust: bool) -> Option<u8> {
     let t = word.trim();
-    if t.is_empty() { return false; }
-    let first = t.chars().next().unwrap();
-    // Convention: capitalized words or common primitives
-    if first.is_uppercase() { return true; }
-    match t {
-        "int" | "long" | "string" | "bool" | "double" | "float" | "byte" | "char" | "void" |
-        "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" | "usize" | "isize" => true,
-        _ => false,
+    if t.is_empty() {
+        return None;
     }
+
+    if is_c_sharp {
+        return match t {
+            "public" | "private" | "protected" | "internal" | "static" | "readonly" => Some(5),
+            "class" | "struct" | "enum" | "interface" | "int" | "long" | "string" | "bool" |
+            "double" | "float" | "byte" | "char" | "void" | "object" | "var" => Some(3),
+            "null" | "true" | "false" => Some(7),
+            "using" | "namespace" | "return" | "if" | "else" | "for" | "while" | "new" => Some(2),
+            _ => None,
+        };
+    }
+
+    if is_rust {
+        return match t {
+            "true" | "false" | "None" | "Some" => Some(7),
+            "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" | "usize" | "isize" => Some(3),
+            "pub" | "fn" | "let" | "mut" | "use" | "mod" | "impl" | "struct" | "enum" |
+            "return" | "if" | "else" => Some(2),
+            _ => None,
+        };
+    }
+
+    if is_js_ts {
+        return match t {
+            "null" | "true" | "false" => Some(7),
+            "import" | "from" | "const" | "let" | "var" | "class" | "interface" |
+            "public" | "private" | "return" | "if" | "else" | "new" => Some(2),
+            _ => None,
+        };
+    }
+
+    None
 }
