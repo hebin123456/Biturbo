@@ -21,10 +21,15 @@ typedef struct { BtTreemapItem *items; int64_t items_len; int64_t items_cap; } B
 
 typedef struct { int64_t index; double size; } Node;
 
+// Stable descending sort: equal sizes keep original index order (ascending).
+// The reference DLL preserves input order for equal-sized nodes.
 static int cmp_node_desc(const void *a, const void *b) {
-    double da = ((const Node*)a)->size, db = ((const Node*)b)->size;
-    if (da < db) return 1;
-    if (da > db) return -1;
+    const Node *na = a, *nb = b;
+    if (na->size < nb->size) return 1;
+    if (na->size > nb->size) return -1;
+    // equal size -> stable by original index ascending
+    if (na->index < nb->index) return -1;
+    if (na->index > nb->index) return 1;
     return 0;
 }
 
@@ -64,7 +69,9 @@ static void layout_rec(Node *nodes, int64_t start, int64_t n, BtRect rect, OutBu
         double s0 = nodes[start].size, s1 = nodes[start+1].size;
         double denom = s0 + s1;
         double frac = denom > 0.0 ? s0 / denom : 0.5;
-        if (rect.w >= rect.h) {
+        // Reference uses strict w>h for the 2-node split direction: when
+        // w==h it splits along h (horizontal bands), not w.
+        if (rect.w > rect.h) {
             double w0 = rect.w * frac;
             emit(out, nodes[start].index,   (BtRect){rect.x, rect.y, w0, rect.h});
             emit(out, nodes[start+1].index, (BtRect){rect.x + w0, rect.y, rect.w - w0, rect.h});
