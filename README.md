@@ -1,8 +1,8 @@
 # Biturbo
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
-[![Release](https://img.shields.io/github/v/release/hebin123456/Biturbo)](https://github.com/hebin123456/Biturbo/releases)
 [![Build](https://github.com/hebin123456/Biturbo/actions/workflows/build-windows.yml/badge.svg)](https://github.com/hebin123456/Biturbo/actions/workflows/build-windows.yml)
+[![Release](https://img.shields.io/github/v/release/hebin123456/Biturbo)](https://github.com/hebin123456/Biturbo/releases)
 
 > A Rust-based drop-in replacement for Git for Windows' `libgit2.dll`, with an
 > extended high-performance Git repository API on top.
