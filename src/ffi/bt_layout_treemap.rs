@@ -1,6 +1,7 @@
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::winheap::heap_alloc;
 use std::os::raw::c_int;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -28,15 +29,38 @@ pub struct BtLayoutTreemapResult {
 #[derive(Clone, Copy, Debug)]
 struct Node {
     index: i64,
-    // Size normalized to f64 at construction time, matching the reference
-    // implementation. All layout arithmetic is done in f64 to avoid i64
-    // overflow (which previously panicked at the FFI boundary and aborted
-    // the host process).
+    // The reference DLL converts the incoming i64 bits through an unsigned
+    // integer-to-f64 path. This preserves normal positive sizes and also
+    // matches the legacy behavior for negative inputs.
     size: f64,
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn bt_layout_treemap(
+    sizes_ptr: *const i64,
+    sizes_len: i64,
+    rect: BtRect,
+    out_result: *mut BtLayoutTreemapResult,
+) -> c_int {
+    match catch_unwind(AssertUnwindSafe(|| unsafe {
+        bt_layout_treemap_impl_ffi(sizes_ptr, sizes_len, rect, out_result)
+    })) {
+        Ok(code) => code,
+        Err(_) => {
+            set_last_error_str("bt_layout_treemap panicked");
+            if !out_result.is_null() {
+                unsafe {
+                    (*out_result).items = core::ptr::null_mut();
+                    (*out_result).items_len = 0;
+                    (*out_result).items_cap = 0;
+                }
+            }
+            1
+        }
+    }
+}
+
+unsafe fn bt_layout_treemap_impl_ffi(
     sizes_ptr: *const i64,
     sizes_len: i64,
     rect: BtRect,
@@ -59,23 +83,22 @@ pub unsafe extern "C" fn bt_layout_treemap(
 
     let sizes = unsafe { std::slice::from_raw_parts(sizes_ptr, sizes_len as usize) };
     let items = layout_treemap_impl(sizes, rect);
-    assign_items_result(items, out_result);
-    0
+    unsafe { assign_items_result(items, out_result) }
 }
 
 /// Pure layout logic, separated from the FFI allocation so it can be unit
 /// tested on any platform.
 ///
-/// Matches the reference `biturbo.dll`: every size is converted to f64 up
-/// front, and layout uses the squarify algorithm. For fewer than 3 nodes a
-/// simple proportional split is used (also matching the reference).
+/// Matches the reference `biturbo.dll`, including its legacy treemap quirks:
+/// sizes are converted as unsigned 64-bit values, and the recursive squarify
+/// routine intentionally uses the same off-by-one row accumulation behavior.
 fn layout_treemap_impl(sizes: &[i64], rect: BtRect) -> Vec<BtTreemapItem> {
     let mut nodes: Vec<Node> = sizes
         .iter()
         .enumerate()
         .map(|(i, &s)| Node {
             index: i as i64,
-            size: if s > 0 { s as f64 } else { 0.0 },
+            size: (s as u64) as f64,
         })
         .collect();
 
@@ -88,179 +111,134 @@ fn layout_treemap_impl(sizes: &[i64], rect: BtRect) -> Vec<BtTreemapItem> {
         return items;
     }
 
-    // Total of all positive sizes, accumulated in f64 (no overflow risk).
     let total: f64 = nodes.iter().map(|n| n.size).sum();
 
-    if total <= 0.0 {
-        // All sizes are zero/negative: emit 1x1 placeholders anchored at rect.
+    if total == 0.0 && nodes.len() >= 3 {
+        // The original returns 1x1 placeholders for an all-zero input.
         for n in &nodes {
             items.push(BtTreemapItem {
                 index: n.index,
-                rect: BtRect { x: rect.x, y: rect.y, w: 1.0, h: 1.0 },
+                rect: BtRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
             });
         }
         return items;
     }
 
-    // Fewer than 3 nodes: simple proportional split (matches reference's
-    // small-count path; squarify is suboptimal for 1-2 nodes).
-    if nodes.len() < 3 {
-        layout_simple(&nodes, rect, &mut items);
-        return items;
-    }
-
-    // 3+ nodes: squarify.
-    //
-    // Per-node areas are FIXED up front (canvas_area * size / total) and never
-    // rescaled. This is what guarantees the rows tile the canvas without gaps:
-    // the remaining rectangle's area always equals the sum of the remaining
-    // nodes' fixed areas, so each row consumes exactly its share. The previous
-    // implementation rescaled areas against the shrinking `remaining` area
-    // while dividing by the fixed `total`, which made every row after the
-    // first progressively too thin and left unfilled gaps.
-    let canvas_area = f64::max(0.0, rect.w * rect.h);
-
-    let mut remaining = rect;
-    let mut row: Vec<usize> = Vec::new();
-    let mut i = 0;
-    while i < nodes.len() {
-        let candidate_worst = worst_aspect(&nodes, &row, i, canvas_area, total, &remaining);
-        let current_worst = if row.is_empty() {
-            f64::INFINITY
-        } else {
-            worst_aspect(&nodes, &row, usize::MAX, canvas_area, total, &remaining)
-        };
-
-        if !row.is_empty() && candidate_worst > current_worst {
-            // Adding this node makes the row worse; lay out the current row
-            // and start a new one.
-            layout_row(&nodes, &row, canvas_area, total, &mut remaining, &mut items);
-            row.clear();
-        }
-        row.push(i);
-        i += 1;
-    }
-    // Flush the final row.
-    if !row.is_empty() {
-        layout_row(&nodes, &row, canvas_area, total, &mut remaining, &mut items);
-    }
+    layout_legacy_recursive(&nodes, rect, &mut items);
 
     items
 }
 
-/// Worst aspect ratio of a row of nodes within `remaining`, optionally
-/// including the candidate node `candidate` (usize::MAX means "current row
-/// only"). `canvas_area` and `total` define the fixed per-node area
-/// (`canvas_area * size / total`), independent of the current `remaining`.
-fn worst_aspect(
-    nodes: &[Node],
-    row: &[usize],
-    candidate: usize,
-    canvas_area: f64,
-    total: f64,
-    remaining: &BtRect,
-) -> f64 {
-    let fixed = |idx: usize| canvas_area * nodes[idx].size / total;
-    let mut sum_area = 0.0f64;
-    let mut min_area = f64::INFINITY;
-    let mut max_area = 0.0f64;
-
-    for &idx in row {
-        let a = fixed(idx);
-        sum_area += a;
-        if a < min_area { min_area = a; }
-        if a > max_area { max_area = a; }
-    }
-    if candidate != usize::MAX {
-        let a = fixed(candidate);
-        sum_area += a;
-        if a < min_area { min_area = a; }
-        if a > max_area { max_area = a; }
-    }
-
-    if sum_area <= 0.0 || min_area <= 0.0 {
-        return f64::INFINITY;
-    }
-    // The row is laid out spanning the SHORT side of `remaining`; `layout_row`
-    // must use the same convention for the aspect formula to hold.
-    let side = remaining.w.min(remaining.h);
-    if side <= 0.0 {
-        return f64::INFINITY;
-    }
-    let s2 = side * side;
-    // max(side^2 * maxArea / sum^2, sum^2 / (side^2 * minArea))
-    (s2 * max_area / (sum_area * sum_area)).max((sum_area * sum_area) / (s2 * min_area))
-}
-
-/// Lay out a row of nodes spanning the SHORT side of `remaining`, pushing the
-/// produced items into `items` and shrinking `remaining` along the long side.
-///
-/// The row is a strip whose length equals the short side and whose thickness
-/// `t = sum_area / short_side` runs along the long side. Items tile along the
-/// short side, each with length `area_i / t`. This matches `worst_aspect`'s
-/// short-side convention. (The previous implementation conditioned on
-/// `remaining.w >= remaining.h`, i.e. the LONG side, which contradicted
-/// `worst_aspect` and produced wrong layouts.)
-fn layout_row(
-    nodes: &[Node],
-    row: &[usize],
-    canvas_area: f64,
-    total: f64,
-    remaining: &mut BtRect,
-    items: &mut Vec<BtTreemapItem>,
-) {
-    let fixed = |idx: usize| canvas_area * nodes[idx].size / total;
-    let mut sum_area = 0.0f64;
-    for &idx in row {
-        sum_area += fixed(idx);
-    }
-    if sum_area <= 0.0 || row.is_empty() {
+fn layout_legacy_recursive(nodes: &[Node], rect: BtRect, items: &mut Vec<BtTreemapItem>) {
+    if nodes.is_empty() {
         return;
     }
 
-    if remaining.w <= remaining.h {
-        // Short side is w: horizontal strip of full width `remaining.w`,
-        // thickness `t` along h. Items tile along x.
-        let t = if remaining.w > 0.0 { sum_area / remaining.w } else { 0.0 };
-        let mut x = remaining.x;
-        for &idx in row {
-            let a = fixed(idx);
-            let w = if t > 0.0 { a / t } else { 0.0 };
+    if nodes.len() < 3 {
+        layout_legacy_simple(nodes, rect, items);
+        return;
+    }
+
+    let total_without_last: f64 = nodes[..nodes.len() - 1].iter().map(|n| n.size).sum();
+    if total_without_last == 0.0 {
+        for n in nodes {
             items.push(BtTreemapItem {
-                index: nodes[idx].index,
-                rect: BtRect { x, y: remaining.y, w, h: t },
+                index: n.index,
+                rect: BtRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
             });
-            x += w;
         }
-        remaining.y += t;
-        remaining.h -= t;
-    } else {
-        // Short side is h: vertical strip of full height `remaining.h`,
-        // thickness `t` along w. Items tile along y.
-        let t = if remaining.h > 0.0 { sum_area / remaining.h } else { 0.0 };
+        return;
+    }
+    if !total_without_last.is_finite() {
+        layout_legacy_simple(nodes, rect, items);
+        return;
+    }
+
+    let first_ratio = nodes[0].size / total_without_last;
+    if first_ratio <= 0.0 || !first_ratio.is_finite() {
+        layout_legacy_simple(nodes, rect, items);
+        return;
+    }
+
+    let mut row_ratio = first_ratio;
+    let mut row_len = 1usize;
+    while row_len < nodes.len() {
+        let candidate_ratio = row_ratio + nodes[row_len - 1].size / total_without_last;
+        if legacy_aspect(candidate_ratio, first_ratio, rect) > legacy_aspect(row_ratio, first_ratio, rect) {
+            break;
+        }
+        row_ratio = candidate_ratio;
+        row_len += 1;
+    }
+
+    let mut remaining = rect;
+    layout_legacy_row(&nodes[..row_len], row_ratio, &mut remaining, items);
+    if row_len < nodes.len() {
+        layout_legacy_recursive(&nodes[row_len..], remaining, items);
+    }
+}
+
+fn legacy_aspect(sum_ratio: f64, first_ratio: f64, rect: BtRect) -> f64 {
+    if rect.w <= 0.0 || rect.h <= 0.0 || sum_ratio <= 0.0 || first_ratio <= 0.0 {
+        return f64::INFINITY;
+    }
+    let long_over_short = if rect.h > rect.w { rect.h / rect.w } else { rect.w / rect.h };
+    let aspect = long_over_short * sum_ratio * sum_ratio / first_ratio;
+    if aspect < 1.0 { 1.0 / aspect } else { aspect }
+}
+
+fn layout_legacy_row(row: &[Node], row_ratio: f64, remaining: &mut BtRect, items: &mut Vec<BtTreemapItem>) {
+    if row.is_empty() {
+        return;
+    }
+    let row_total: f64 = row.iter().map(|n| n.size).sum();
+    if row_total == 0.0 || !row_total.is_finite() {
+        return;
+    }
+
+    if remaining.w >= remaining.h {
+        let strip_w = remaining.w * row_ratio;
         let mut y = remaining.y;
-        for &idx in row {
-            let a = fixed(idx);
-            let h = if t > 0.0 { a / t } else { 0.0 };
+        for n in row {
+            let h = remaining.h * n.size / row_total;
             items.push(BtTreemapItem {
-                index: nodes[idx].index,
-                rect: BtRect { x: remaining.x, y, w: t, h },
+                index: n.index,
+                rect: BtRect { x: remaining.x, y, w: strip_w, h },
             });
             y += h;
         }
-        remaining.x += t;
-        remaining.w -= t;
+        remaining.x += strip_w;
+        remaining.w -= strip_w;
+    } else {
+        let strip_h = remaining.h * row_ratio;
+        let mut x = remaining.x;
+        for n in row {
+            let w = remaining.w * n.size / row_total;
+            items.push(BtTreemapItem {
+                index: n.index,
+                rect: BtRect { x, y: remaining.y, w, h: strip_h },
+            });
+            x += w;
+        }
+        remaining.y += strip_h;
+        remaining.h -= strip_h;
     }
 }
 
 /// Simple proportional split for fewer than 3 nodes. With one node it fills
 /// the whole rect; with two it splits along the longer dimension by size
 /// ratio.
-fn layout_simple(nodes: &[Node], rect: BtRect, items: &mut Vec<BtTreemapItem>) {
+fn layout_legacy_simple(nodes: &[Node], rect: BtRect, items: &mut Vec<BtTreemapItem>) {
     if nodes.is_empty() {
         return;
     }
     if nodes.len() == 1 {
+        let frac = nodes[0].size / nodes[0].size;
+        let rect = if rect.w >= rect.h {
+            BtRect { x: rect.x, y: rect.y, w: rect.w * frac, h: rect.h }
+        } else {
+            BtRect { x: rect.x, y: rect.y, w: rect.w, h: rect.h * frac }
+        };
         items.push(BtTreemapItem {
             index: nodes[0].index,
             rect,
@@ -269,7 +247,7 @@ fn layout_simple(nodes: &[Node], rect: BtRect, items: &mut Vec<BtTreemapItem>) {
     }
     // Two nodes: split along the longer side.
     let denom = nodes[0].size + nodes[1].size;
-    let frac = if denom > 0.0 { nodes[0].size / denom } else { 0.5 };
+    let frac = nodes[0].size / denom;
     if rect.w >= rect.h {
         let w0 = rect.w * frac;
         items.push(BtTreemapItem {
@@ -293,17 +271,23 @@ fn layout_simple(nodes: &[Node], rect: BtRect, items: &mut Vec<BtTreemapItem>) {
     }
 }
 
-unsafe fn assign_items_result(items: Vec<BtTreemapItem>, out_result: *mut BtLayoutTreemapResult) {
-    let bytes_len = items.len() * std::mem::size_of::<BtTreemapItem>();
+unsafe fn assign_items_result(items: Vec<BtTreemapItem>, out_result: *mut BtLayoutTreemapResult) -> c_int {
+    let Some(bytes_len) = items.len().checked_mul(std::mem::size_of::<BtTreemapItem>()) else {
+        set_last_error_str("allocation size overflow");
+        return 1;
+    };
     let ptr = unsafe { heap_alloc(bytes_len) } as *mut BtTreemapItem;
-    if !ptr.is_null() {
-        unsafe {
-            core::ptr::copy_nonoverlapping(items.as_ptr(), ptr, items.len());
-            (*out_result).items = ptr;
-            (*out_result).items_len = items.len() as i64;
-            (*out_result).items_cap = items.len() as i64;
-        }
+    if ptr.is_null() {
+        set_last_error_str("insufficient memory");
+        return 1;
     }
+    unsafe {
+        core::ptr::copy_nonoverlapping(items.as_ptr(), ptr, items.len());
+        (*out_result).items = ptr;
+        (*out_result).items_len = items.len() as i64;
+        (*out_result).items_cap = items.len() as i64;
+    }
+    0
 }
 
 #[cfg(test)]
@@ -356,106 +340,98 @@ mod tests {
         assert_eq!(items.len(), sizes.len());
     }
 
-    // Correctness: squarify must tile the canvas with no gaps and no overlaps,
-    // each item's area exactly proportional to its size. This is the real
-    // regression test for the two bugs that made the 1.0.1 layout wrong:
-    //   * row laid along the LONG side (contradicting `worst_aspect`)
-    //   * areas rescaled against the shrinking `remaining` (leaving gaps)
-    fn assert_tiling_correct(items: &[BtTreemapItem], sizes: &[i64], rect: BtRect) {
-        assert_eq!(items.len(), sizes.len(), "one item per input");
-
-        let canvas = rect.w * rect.h;
-        let total: f64 = sizes.iter().map(|&s| s as f64).sum();
-
-        // Each item lies inside the rect and has area == size/total * canvas.
-        for it in items {
-            assert!(it.rect.w >= 0.0 && it.rect.h >= 0.0, "negative dims: {:?}", it);
-            assert!(it.rect.x >= rect.x - 1e-6, "x below: {:?}", it);
-            assert!(it.rect.y >= rect.y - 1e-6, "y below: {:?}", it);
-            assert!(
-                it.rect.x + it.rect.w <= rect.x + rect.w + 1e-3,
-                "x+w exceeds: {:?}",
-                it
-            );
-            assert!(
-                it.rect.y + it.rect.h <= rect.y + rect.h + 1e-3,
-                "y+h exceeds: {:?}",
-                it
-            );
-
-            let expected = sizes[it.index as usize] as f64 / total * canvas;
-            let actual = it.rect.w * it.rect.h;
-            assert!(
-                (actual - expected).abs() < expected * 0.001 + 1e-3,
-                "item {} area mismatch: expected {} got {} ({:?})",
-                it.index,
-                expected,
-                actual,
-                it.rect
-            );
-        }
-
-        // No two items overlap (beyond a tiny epsilon for f64 rounding).
-        for a in 0..items.len() {
-            for b in (a + 1)..items.len() {
-                let ia = &items[a];
-                let ib = &items[b];
-                let x1 = ia.rect.x.max(ib.rect.x);
-                let x2 = (ia.rect.x + ia.rect.w).min(ib.rect.x + ib.rect.w);
-                let y1 = ia.rect.y.max(ib.rect.y);
-                let y2 = (ia.rect.y + ia.rect.h).min(ib.rect.y + ib.rect.h);
-                let ox = (x2 - x1).max(0.0);
-                let oy = (y2 - y1).max(0.0);
-                assert!(
-                    ox * oy < 1e-3,
-                    "items {} and {} overlap by {}",
-                    a,
-                    b,
-                    ox * oy
-                );
-            }
-        }
-
-        // Coverage: laid-out area fills the canvas (no gaps).
-        let covered: f64 = items.iter().map(|it| it.rect.w * it.rect.h).sum();
-        assert!(
-            (covered - canvas).abs() < canvas * 0.001 + 1e-3,
-            "coverage mismatch: covered {} vs canvas {}",
-            covered,
-            canvas
-        );
+    fn assert_item_close(item: &BtTreemapItem, expected: (i64, f64, f64, f64, f64)) {
+        let (index, x, y, w, h) = expected;
+        assert_eq!(item.index, index);
+        assert!((item.rect.x - x).abs() < 1e-6, "x mismatch: {:?}", item);
+        assert!((item.rect.y - y).abs() < 1e-6, "y mismatch: {:?}", item);
+        assert!((item.rect.w - w).abs() < 1e-6, "w mismatch: {:?}", item);
+        assert!((item.rect.h - h).abs() < 1e-6, "h mismatch: {:?}", item);
     }
 
     #[test]
-    fn squarify_tiles_landscape_canvas() {
+    fn legacy_layout_matches_reference_landscape() {
         let sizes = vec![60, 30, 20, 15, 10, 5];
         let rect = BtRect { x: 0.0, y: 0.0, w: 1000.0, h: 600.0 };
         let items = call(&sizes, rect);
-        assert_tiling_correct(&items, &sizes, rect);
+        let expected = [
+            (0, 0.0, 0.0, 444.44444444444446, 600.0),
+            (1, 444.44444444444446, 0.0, 333.3333333333333, 480.0),
+            (2, 777.7777777777778, 0.0, 222.22222222222223, 480.0),
+            (3, 444.44444444444446, 480.0, 333.3333333333333, 120.0),
+            (4, 777.7777777777778, 480.0, 148.14814814814815, 120.0),
+            (5, 925.9259259259259, 480.0, 74.07407407407408, 120.0),
+        ];
+        assert_eq!(items.len(), expected.len());
+        for (item, expected) in items.iter().zip(expected) {
+            assert_item_close(item, expected);
+        }
     }
 
     #[test]
-    fn squarify_tiles_portrait_canvas() {
-        let sizes = vec![40, 25, 15, 10, 8, 2];
-        let rect = BtRect { x: 0.0, y: 0.0, w: 300.0, h: 1000.0 };
-        let items = call(&sizes, rect);
-        assert_tiling_correct(&items, &sizes, rect);
-    }
-
-    #[test]
-    fn squarify_tiles_square_canvas_many() {
+    fn legacy_layout_matches_reference_many() {
         let sizes = vec![100, 80, 60, 45, 35, 25, 20, 15, 10, 5, 3, 2];
-        let rect = BtRect { x: 5.0, y: 7.0, w: 512.0, h: 512.0 };
+        let rect = BtRect { x: 0.0, y: 0.0, w: 100.0, h: 60.0 };
         let items = call(&sizes, rect);
-        assert_tiling_correct(&items, &sizes, rect);
+        let expected = [
+            (0, 0.0, 0.0, 50.251256281407031, 33.333333333333336),
+            (1, 0.0, 33.333333333333336, 50.251256281407031, 26.666666666666664),
+            (2, 50.251256281407031, 0.0, 28.427853553481697, 33.027522935779821),
+            (3, 78.67910983488872, 0.0, 21.320890165111273, 33.027522935779821),
+            (4, 50.251256281407031, 33.027522935779821, 15.408902921688087, 26.972477064220183),
+            (5, 65.66015920309512, 33.027522935779821, 22.012718459554414, 14.984709480122325),
+            (6, 65.66015920309512, 48.012232415902147, 22.012718459554414, 11.987767584097858),
+            (7, 87.67287766264954, 33.027522935779821, 12.327122337350469, 12.26021684737281),
+            (8, 87.67287766264954, 45.287739783152631, 12.327122337350469, 8.17347789824854),
+            (9, 87.67287766264954, 53.461217681401173, 7.7044514608440426, 6.5387823185988312),
+            (10, 95.377329123493581, 53.461217681401173, 4.6226708765064259, 3.9232693911592986),
+            (11, 95.377329123493581, 57.384487072560475, 4.6226708765064259, 2.6155129274395326),
+        ];
+        assert_eq!(items.len(), expected.len());
+        for (item, expected) in items.iter().zip(expected) {
+            assert_item_close(item, expected);
+        }
     }
 
     #[test]
-    fn squarify_tiles_with_offset_origin() {
-        let sizes = vec![50, 40, 30, 20, 10];
-        let rect = BtRect { x: 100.0, y: 200.0, w: 800.0, h: 400.0 };
+    fn legacy_negative_input_matches_unsigned_conversion() {
+        let sizes = vec![-1, 5, 2];
+        let rect = BtRect { x: 0.0, y: 0.0, w: 100.0, h: 60.0 };
         let items = call(&sizes, rect);
-        assert_tiling_correct(&items, &sizes, rect);
+        assert_eq!(items.len(), sizes.len());
+        assert_eq!(items[0].index, 0);
+        assert!((items[0].rect.w - 100.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn legacy_zero_values_match_reference() {
+        let rect = BtRect { x: 0.0, y: 0.0, w: 100.0, h: 60.0 };
+
+        let one_zero = call(&[0], rect);
+        assert_eq!(one_zero.len(), 1);
+        assert_eq!(one_zero[0].index, 0);
+        assert!(one_zero[0].rect.w.is_nan());
+        assert_eq!(one_zero[0].rect.h, 60.0);
+
+        let three_zeros = call(&[0, 0, 0], BtRect { x: 10.0, y: 20.0, w: 100.0, h: 60.0 });
+        assert_eq!(three_zeros.len(), 3);
+        for item in three_zeros {
+            assert_eq!(item.rect, BtRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
+        }
+
+        let mixed = call(&[0, 1, 0, 1, 0, 1], rect);
+        let expected = [
+            (1, 0.0, 0.0, 33.333333333333329, 60.0),
+            (3, 33.333333333333329, 0.0, 33.333333333333336, 60.0),
+            (5, 66.666666666666657, 0.0, 33.333333333333336, 60.0),
+            (0, 0.0, 0.0, 1.0, 1.0),
+            (2, 0.0, 0.0, 1.0, 1.0),
+            (4, 0.0, 0.0, 1.0, 1.0),
+        ];
+        assert_eq!(mixed.len(), expected.len());
+        for (item, expected) in mixed.iter().zip(expected) {
+            assert_item_close(item, expected);
+        }
     }
 }
 

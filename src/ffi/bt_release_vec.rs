@@ -6,16 +6,13 @@ unsafe fn release_btbuf(buf: *mut BtBuf) {
     if buf.is_null() {
         return;
     }
-    // Match original: only free if cap != 0.
+    // Match original: only free if cap != 0, and do not mutate the caller's
+    // buffer fields after release.
     let cap = unsafe { (*buf).cap };
     if cap == 0 {
         return;
     }
-    let ptr = std::ptr::replace(&mut (*buf).ptr, core::ptr::null_mut());
-    unsafe {
-        (*buf).cap = 0;
-        (*buf).len = 0;
-    }
+    let ptr = unsafe { (*buf).ptr };
     if !ptr.is_null() {
         unsafe { heap_free(ptr) };
     }

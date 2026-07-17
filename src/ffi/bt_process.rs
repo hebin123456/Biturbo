@@ -395,25 +395,33 @@ pub unsafe extern "C" fn bt_spawn_with_callback(
     let cb = read_line_cb;
 
     let stdout_thread = thread::spawn(move || {
-        use std::io::Read;
-        let mut buf = [0u8; 4096];
-        let mut pipe = stdout_pipe;
-        while let Ok(n) = pipe.read(&mut buf) {
-            if n == 0 { break; }
-            unsafe {
-                cb(target as *mut c_void, 0, buf.as_ptr(), n as i64);
+        use std::io::{BufRead, BufReader};
+        let mut reader = BufReader::new(stdout_pipe);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) => break,
+                Ok(_) => unsafe {
+                    cb(target as *mut c_void, 0, line.as_ptr(), line.len() as i64);
+                },
+                Err(_) => break,
             }
         }
     });
 
     let stderr_thread = thread::spawn(move || {
-        use std::io::Read;
-        let mut buf = [0u8; 4096];
-        let mut pipe = stderr_pipe;
-        while let Ok(n) = pipe.read(&mut buf) {
-            if n == 0 { break; }
-            unsafe {
-                cb(target as *mut c_void, 1, buf.as_ptr(), n as i64);
+        use std::io::{BufRead, BufReader};
+        let mut reader = BufReader::new(stderr_pipe);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) => break,
+                Ok(_) => unsafe {
+                    cb(target as *mut c_void, 1, line.as_ptr(), line.len() as i64);
+                },
+                Err(_) => break,
             }
         }
     });
