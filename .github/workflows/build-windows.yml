@@ -1,13 +1,14 @@
-name: Release
+name: Build Windows
 
-# Pushing a `v*` tag triggers this single pipeline: build, test, verify, and
-# publish a GitHub Release. CI is folded in here so the DLL is built only once
-# per tag (previously CI and Release each built independently). Pushing to
-# master does not trigger anything.
+# Pushing a `v*` tag (or a manual workflow_dispatch) triggers this single
+# pipeline: build, test, verify, upload artifact, and on tag also publish a
+# GitHub Release. CI is folded in here so the DLL is built only once per tag.
+# Pushing to master does not trigger anything.
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,12 +17,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release-windows:
+  build:
     name: Build + Test + Release (Windows x64, MSVC)
     runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install Rust toolchain (stable, MSVC)
         uses: dtolnay/rust-toolchain@stable
@@ -38,6 +41,7 @@ jobs:
 
       - name: Derive version from tag
         id: ver
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
           # tag looks like v1.0.0 -> strip leading 'v'
@@ -46,6 +50,7 @@ jobs:
           echo "Releasing version $TAG"
 
       - name: Sync Cargo.toml version with tag
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
@@ -80,6 +85,7 @@ jobs:
             biturbo.def
 
       - name: Stage release artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
@@ -93,7 +99,15 @@ jobs:
           (cd staging && 7z a -tzip "biturbo-windows-x64-$VERSION.zip" "biturbo-windows-x64-$VERSION")
           ls -la staging
 
-      - name: Create GitHub Release
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: biturbo-windows-x64
+          path: target/x86_64-pc-windows-msvc/release/biturbo.dll
+          if-no-files-found: error
+
+      - name: Release on tag
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}

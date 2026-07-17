@@ -2,7 +2,7 @@ name: Bump & Tag
 
 # Auto-tag: manually trigger a version bump. This workflow bumps the version
 # in Cargo.toml, commits it, and pushes a `vX.Y.Z` tag — which then triggers
-# release.yml to build and publish the GitHub Release automatically.
+# build-windows.yml to build and publish the GitHub Release automatically.
 on:
   workflow_dispatch:
     inputs:
@@ -88,4 +88,4 @@ jobs:
           git push origin HEAD:master
           git push origin "$TAG"
 
-          echo "Pushed tag $TAG — release.yml will take it from here."
+          echo "Pushed tag $TAG — build-windows.yml will take it from here."
