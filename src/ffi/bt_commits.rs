@@ -1129,4 +1129,122 @@ mod tests {
         let oid = BtOid { s0: 0xABCDEF01, s1: 0, s2: 0, s3: 0, s4: 0 };
         assert_eq!(btoid_to_hex(&oid), "abcdef0100000000000000000000000000000000");
     }
+
+    #[test]
+    fn btoid_to_hex_padding_leading_zeros() {
+        // 验证前导 0 被正确填充
+        let oid = BtOid { s0: 0x00000001, s1: 0x00000002, s2: 0x00000003, s3: 0x00000004, s4: 0x00000005 };
+        assert_eq!(btoid_to_hex(&oid), "0000000100000002000000030000000400000005");
+        assert_eq!(btoid_to_hex(&oid).len(), 40);
+    }
+
+    #[test]
+    fn btoid_to_hex_each_word_independent() {
+        // 单独验证每个 word 在 hex 串中的位置
+        let oid = BtOid {
+            s0: 0x11223344,
+            s1: 0x55667788,
+            s2: 0x99aabbcc,
+            s3: 0xddeeff00,
+            s4: 0x12345678,
+        };
+        let hex = btoid_to_hex(&oid);
+        assert_eq!(&hex[0..8], "11223344");
+        assert_eq!(&hex[8..16], "55667788");
+        assert_eq!(&hex[16..24], "99aabbcc");
+        assert_eq!(&hex[24..32], "ddeeff00");
+        assert_eq!(&hex[32..40], "12345678");
+    }
+
+    #[test]
+    fn next_legacy_capacity_one_returns_one() {
+        // 1 已经是 2 的幂，next_power_of_two(1) == 1
+        assert_eq!(next_legacy_capacity(1), 1);
+    }
+
+    #[test]
+    fn next_legacy_capacity_usize_max_no_panic() {
+        // usize::MAX 不应 panic（其 next_power_of_two 在内部溢出时返回自身）
+        // 这里只验证不 panic，结果可能为 usize::MAX
+        let _ = next_legacy_capacity(usize::MAX);
+    }
+
+    #[test]
+    fn next_legacy_capacity_returns_at_least_input() {
+        for n in [0usize, 1, 2, 3, 7, 15, 16, 17, 100, 1024, 1025, 65535, 65536] {
+            let cap = next_legacy_capacity(n);
+            // 0 是唯一例外：next_legacy_capacity(0) == 0
+            if n == 0 {
+                assert_eq!(cap, 0);
+            } else {
+                assert!(cap >= n, "cap={cap} 应不小于 n={n}");
+                // 同时应是 2 的幂（n=0 除外）
+                assert_eq!(cap & (cap - 1), 0, "cap={cap} 应是 2 的幂");
+            }
+        }
+    }
+
+    #[test]
+    fn git_oid_to_btoid_roundtrip() {
+        // 构造一个已知的 git2::Oid，验证转换后字节序正确
+        let hex = "0123456789abcdef0123456789abcdef01234567";
+        let oid = git2::Oid::from_str(hex).unwrap();
+        let btoid = git_oid_to_btoid(oid);
+        // btoid_to_hex 与原始 hex 应一致
+        assert_eq!(btoid_to_hex(&btoid), hex);
+    }
+
+    #[test]
+    fn git_oid_to_btoid_zero_oid() {
+        let zero = git2::Oid::zero();
+        let btoid = git_oid_to_btoid(zero);
+        assert_eq!(btoid.s0, 0);
+        assert_eq!(btoid.s1, 0);
+        assert_eq!(btoid.s2, 0);
+        assert_eq!(btoid.s3, 0);
+        assert_eq!(btoid.s4, 0);
+        assert_eq!(btoid_to_hex(&btoid), "0000000000000000000000000000000000000000");
+    }
+
+    #[test]
+    fn cstr_to_utf8_null_returns_err() {
+        // null 指针应返回 Err(BT_ERR=1)
+        let rc = cstr_to_utf8(core::ptr::null(), "test_field");
+        assert!(rc.is_err());
+        assert_eq!(rc.unwrap_err(), BT_ERR);
+    }
+
+    #[test]
+    fn cstr_to_utf8_valid_string() {
+        // 合法 NUL 终止 UTF-8 字符串应返回 Ok
+        let s = std::ffi::CString::new("hello/world").unwrap();
+        let rc = cstr_to_utf8(s.as_ptr(), "test_field");
+        assert!(rc.is_ok());
+        assert_eq!(rc.unwrap(), "hello/world");
+    }
+
+    #[test]
+    fn cstr_to_utf8_empty_string() {
+        let s = std::ffi::CString::new("").unwrap();
+        let rc = cstr_to_utf8(s.as_ptr(), "test_field");
+        assert!(rc.is_ok());
+        assert_eq!(rc.unwrap(), "");
+    }
+
+    #[test]
+    fn cstr_to_utf8_unicode_string() {
+        // 含中文/emoji 的 UTF-8 字符串应正确解析
+        let s = std::ffi::CString::new("路径/文件.txt \u{1F680}").unwrap();
+        let rc = cstr_to_utf8(s.as_ptr(), "test_field");
+        assert!(rc.is_ok());
+        assert_eq!(rc.unwrap(), "路径/文件.txt \u{1F680}");
+    }
+
+    #[test]
+    fn btoid_to_hex_format_macro_correctness() {
+        // 验证 format! 宏与手工拼接一致
+        let oid = BtOid { s0: 0x1, s1: 0x2, s2: 0x3, s3: 0x4, s4: 0x5 };
+        let expected = format!("{:08x}{:08x}{:08x}{:08x}{:08x}", 1, 2, 3, 4, 5);
+        assert_eq!(btoid_to_hex(&oid), expected);
+    }
 }

@@ -185,6 +185,180 @@ fn parse_config_content(content: &[u8]) -> Result<Vec<ParsedEntry>, String> {
     Ok(entries)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // parse_config_content 是纯函数：把 Git 风格 INI 配置文本解析为
+    // section/subsection/kv 三元组列表。不依赖 winheap 或文件系统，
+    // 可在 Linux 沙箱上直接测试。
+
+    #[test]
+    fn parse_empty_content_returns_empty() {
+        let entries = parse_config_content(b"").unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_only_comments_and_blanks_returns_empty() {
+        let content = b"\n\
+            ; this is a semicolon comment\n\
+            # this is a hash comment\n\
+            \t\n\
+              \n";
+        let entries = parse_config_content(content).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn parse_single_section_no_kvs() {
+        let entries = parse_config_content(b"[core]\n").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].section, "core");
+        assert_eq!(entries[0].subsection, "");
+        assert!(entries[0].kvs.is_empty());
+    }
+
+    #[test]
+    fn parse_section_with_single_kv() {
+        let content = b"[user]\nname = Alice\n";
+        let entries = parse_config_content(content).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].section, "user");
+        assert_eq!(entries[0].kvs.len(), 1);
+        assert_eq!(entries[0].kvs[0].k, "name");
+        assert_eq!(entries[0].kvs[0].v, "Alice");
+    }
+
+    #[test]
+    fn parse_section_with_multiple_kvs() {
+        let content = b"[user]\nname = Alice\nemail = alice@example.com\n";
+        let entries = parse_config_content(content).unwrap();
+        assert_eq!(entries[0].kvs.len(), 2);
+        assert_eq!(entries[0].kvs[0].k, "name");
+        assert_eq!(entries[0].kvs[0].v, "Alice");
+        assert_eq!(entries[0].kvs[1].k, "email");
+        assert_eq!(entries[0].kvs[1].v, "alice@example.com");
+    }
+
+    #[test]
+    fn parse_quoted_subsection() {
+        // [remote "origin"] -> section=remote, subsection=origin
+        let entries = parse_config_content(b"[remote \"origin\"]\nurl = git@example.com:a.git\n").unwrap();
+        assert_eq!(entries[0].section, "remote");
+        assert_eq!(entries[0].subsection, "origin");
+        assert_eq!(entries[0].kvs[0].k, "url");
+        assert_eq!(entries[0].kvs[0].v, "git@example.com:a.git");
+    }
+
+    #[test]
+    fn parse_unquoted_subsection() {
+        // 子段未加引号时，原样保留（trim 后）
+        let entries = parse_config_content(b"[branch main]\nmerge = refs/heads/main\n").unwrap();
+        assert_eq!(entries[0].section, "branch");
+        assert_eq!(entries[0].subsection, "main");
+    }
+
+    #[test]
+    fn parse_multiple_sections_preserve_order() {
+        let content = b"[core]\nrepositoryformatversion = 0\n[user]\nname = Bob\n[remote \"up\"]\nurl = up\n";
+        let entries = parse_config_content(content).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].section, "core");
+        assert_eq!(entries[1].section, "user");
+        assert_eq!(entries[2].section, "remote");
+        assert_eq!(entries[2].subsection, "up");
+    }
+
+    #[test]
+    fn parse_kv_before_any_section_is_dropped() {
+        // 任何 section 之前的 kv 应被静默丢弃（last_mut 为 None）
+        let content = b"orphan = value\n[core]\nfilemode = true\n";
+        let entries = parse_config_content(content).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kvs.len(), 1, "orphan kv 应被丢弃");
+        assert_eq!(entries[0].kvs[0].k, "filemode");
+    }
+
+    #[test]
+    fn parse_non_utf8_content_returns_err() {
+        // 非法 UTF-8 字节应返回错误
+        let bad = [0x80, 0xFF, b'\n', b'[', b'a', b']'];
+        assert!(parse_config_content(&bad).is_err());
+    }
+
+    #[test]
+    fn parse_crlf_line_endings() {
+        // Windows CRLF 行尾应被正确处理（lines() 会剥掉 \r\n）
+        let content = b"[core]\r\nfilemode = true\r\n";
+        let entries = parse_config_content(content).unwrap();
+        assert_eq!(entries[0].section, "core");
+        assert_eq!(entries[0].kvs[0].k, "filemode");
+        assert_eq!(entries[0].kvs[0].v, "true");
+    }
+
+    #[test]
+    fn parse_kv_with_extra_whitespace_around_equals() {
+        let entries = parse_config_content(b"[core]\n   filemode   =   true   \n").unwrap();
+        assert_eq!(entries[0].kvs[0].k, "filemode");
+        assert_eq!(entries[0].kvs[0].v, "true");
+    }
+
+    #[test]
+    fn parse_kv_value_with_spaces_preserved() {
+        // 值中的内部空格应被保留（仅首尾被 trim）
+        let entries = parse_config_content(b"[core]\nname = Alice Bob Carol\n").unwrap();
+        assert_eq!(entries[0].kvs[0].v, "Alice Bob Carol");
+    }
+
+    #[test]
+    fn parse_value_containing_equals_sign() {
+        // 值中含 '=' 时，仅以首个 '=' 作为分隔
+        let entries = parse_config_content(b"[core]\nurl = https://x?a=1&b=2\n").unwrap();
+        assert_eq!(entries[0].kvs[0].k, "url");
+        assert_eq!(entries[0].kvs[0].v, "https://x?a=1&b=2");
+    }
+
+    #[test]
+    fn parse_line_without_equals_outside_section_is_ignored() {
+        // 既非 section 也非 kv（无 '='）的行应被忽略
+        let content = b"stray line\n[core]\nfilemode = true\n";
+        let entries = parse_config_content(content).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].kvs.len(), 1);
+    }
+
+    #[test]
+    fn parse_section_with_trailing_whitespace_inside_brackets() {
+        // section 名后带空格再闭合 ']'：trim 后应正确解析
+        let entries = parse_config_content(b"[ core ]\nfilemode = true\n").unwrap();
+        assert_eq!(entries[0].section, "core");
+    }
+
+    #[test]
+    fn parse_empty_value() {
+        // 空值（'=' 后无内容）应得到空字符串
+        let entries = parse_config_content(b"[core]\nkey =\n").unwrap();
+        assert_eq!(entries[0].kvs[0].k, "key");
+        assert_eq!(entries[0].kvs[0].v, "");
+    }
+
+    #[test]
+    fn parse_empty_key_with_equals() {
+        // 极端：键为空（'=' 在行首）
+        let entries = parse_config_content(b"[core]\n= value\n").unwrap();
+        assert_eq!(entries[0].kvs[0].k, "");
+        assert_eq!(entries[0].kvs[0].v, "value");
+    }
+
+    #[test]
+    fn parse_section_name_case_preserved() {
+        // Git 配置 section 名大小写不敏感，但本解析器原样保留
+        let entries = parse_config_content(b"[CoRe]\n").unwrap();
+        assert_eq!(entries[0].section, "CoRe");
+    }
+}
+
 /// 释放 [`bt_get_git_config`] 返回的 [`BtGitConfig`]。
 ///
 /// 会逐个 section 释放 `a`（section 名）、`b`（subsection 名）、

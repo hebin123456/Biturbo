@@ -469,6 +469,132 @@ fn parse_hex_oid(hex40: &str) -> Option<BtOid> {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // parse_hex_oid 是纯函数：把 40 字符十六进制 SHA-1 解析为 BtOid。
+    // 它不依赖 winheap 或 git2，可在 Linux 沙箱上直接测试。
+
+    #[test]
+    fn parse_hex_oid_all_zeros() {
+        let oid = parse_hex_oid("0000000000000000000000000000000000000000").unwrap();
+        assert_eq!((oid.s0, oid.s1, oid.s2, oid.s3, oid.s4), (0, 0, 0, 0, 0));
+    }
+
+    #[test]
+    fn parse_hex_oid_all_f_lowercase() {
+        let oid = parse_hex_oid("ffffffffffffffffffffffffffffffffffffffff").unwrap();
+        assert_eq!(oid.s0, 0xFFFFFFFF);
+        assert_eq!(oid.s1, 0xFFFFFFFF);
+        assert_eq!(oid.s2, 0xFFFFFFFF);
+        assert_eq!(oid.s3, 0xFFFFFFFF);
+        assert_eq!(oid.s4, 0xFFFFFFFF);
+    }
+
+    #[test]
+    fn parse_hex_oid_all_f_uppercase() {
+        let oid = parse_hex_oid("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF").unwrap();
+        assert_eq!(oid.s0, 0xFFFFFFFF);
+        assert_eq!(oid.s4, 0xFFFFFFFF);
+    }
+
+    #[test]
+    fn parse_hex_oid_mixed_case() {
+        // 大小写混用应被接受
+        let oid = parse_hex_oid("AaBbCcDdEeFf00112233445566778899aaBbCcDd").unwrap();
+        assert_eq!(oid.s0, 0xAABBCCDD);
+        assert_eq!(oid.s1, 0xEEFF0011);
+        assert_eq!(oid.s2, 0x22334455);
+        assert_eq!(oid.s3, 0x66778899);
+        assert_eq!(oid.s4, 0xAABBCCDD);
+    }
+
+    #[test]
+    fn parse_hex_oid_known_value_each_word_distinct() {
+        // 每个 word 取一个易识别的值
+        let oid = parse_hex_oid("0102030405060708090a0b0c0d0e0f1011121314").unwrap();
+        assert_eq!(oid.s0, 0x01020304);
+        assert_eq!(oid.s1, 0x05060708);
+        assert_eq!(oid.s2, 0x090a0b0c);
+        assert_eq!(oid.s3, 0x0d0e0f10);
+        assert_eq!(oid.s4, 0x11121314);
+    }
+
+    #[test]
+    fn parse_hex_oid_leading_zeros_in_word() {
+        // 验证前导零不会丢失（移位逻辑正确）
+        let oid = parse_hex_oid("0000000100000002000000030000000400000005").unwrap();
+        assert_eq!(oid.s0, 0x00000001);
+        assert_eq!(oid.s1, 0x00000002);
+        assert_eq!(oid.s2, 0x00000003);
+        assert_eq!(oid.s3, 0x00000004);
+        assert_eq!(oid.s4, 0x00000005);
+    }
+
+    #[test]
+    fn parse_hex_oid_too_short_returns_none() {
+        // 39 字符 → None
+        assert!(parse_hex_oid("000000000000000000000000000000000000000").is_none());
+    }
+
+    #[test]
+    fn parse_hex_oid_empty_returns_none() {
+        assert!(parse_hex_oid("").is_none());
+    }
+
+    #[test]
+    fn parse_hex_oid_invalid_char_returns_none() {
+        // 40 字符长度，但含非法字符 'g'
+        assert!(parse_hex_oid("gggggggggggggggggggggggggggggggggggggggg").is_none());
+        // 仅最后一字符非法
+        assert!(parse_hex_oid("000000000000000000000000000000000000000g").is_none());
+        // 含空格
+        assert!(parse_hex_oid("0000000000 000000000000000000000000000000").is_none());
+        // 含分隔符
+        assert!(parse_hex_oid("00000000-00000000-00000000-00000000-00000000").is_none());
+    }
+
+    #[test]
+    fn parse_hex_oid_extra_chars_ignored() {
+        // 长度 > 40 时，仅解析前 40 字符（与原版 len < 40 检查一致）
+        let oid = parse_hex_oid("0102030405060708090a0b0c0d0e0f1011121314EXTRA").unwrap();
+        assert_eq!(oid.s0, 0x01020304);
+        assert_eq!(oid.s4, 0x11121314);
+    }
+
+    #[test]
+    fn parse_hex_oid_exactly_40_boundary() {
+        // 恰好 40 字符应成功（16+16+8 = 40）
+        let s = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(s.len(), 40);
+        assert!(parse_hex_oid(s).is_some());
+    }
+
+    #[test]
+    fn parse_hex_oid_roundtrip_with_btoid_to_bytes() {
+        // 解析后再 to_bytes 应还原为原始字节（大端序）
+        let hex = "deadbeefcafebabe1234567890abcdefdeadbeef";
+        let oid = parse_hex_oid(hex).unwrap();
+        let bytes = oid.to_bytes();
+        // 还原回十六进制应与输入一致（小写）
+        let reconstructed: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(reconstructed, hex);
+    }
+
+    #[test]
+    fn parse_hex_oid_word_boundary_independence() {
+        // 修改第 0 个 word 不应影响其他 word
+        let base = parse_hex_oid("0102030405060708090a0b0c0d0e0f1011121314").unwrap();
+        let modified = parse_hex_oid("ffffffff05060708090a0b0c0d0e0f1011121314").unwrap();
+        assert_ne!(base.s0, modified.s0);
+        assert_eq!(base.s1, modified.s1);
+        assert_eq!(base.s2, modified.s2);
+        assert_eq!(base.s3, modified.s3);
+        assert_eq!(base.s4, modified.s4);
+    }
+}
+
 /// 释放 [`bt_get_references`] 返回的 [`BtReferences`]。
 ///
 /// 会逐个释放 `a`..`e` 五个 `BtBuf.ptr`，**不会**清零结构体字段，

@@ -171,3 +171,195 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 本模块的纯函数测试：hex_nibble / trim_ascii_whitespace / parse_oid_swapped。
+    // 这些函数不依赖 winheap 或 git2，可在 Linux 沙箱上直接测试。
+
+    // ---------- hex_nibble ----------
+
+    #[test]
+    fn hex_nibble_decimal_digits() {
+        assert_eq!(hex_nibble(b'0'), Some(0));
+        assert_eq!(hex_nibble(b'9'), Some(9));
+    }
+
+    #[test]
+    fn hex_nibble_lowercase_hex() {
+        assert_eq!(hex_nibble(b'a'), Some(10));
+        assert_eq!(hex_nibble(b'f'), Some(15));
+    }
+
+    #[test]
+    fn hex_nibble_uppercase_hex() {
+        assert_eq!(hex_nibble(b'A'), Some(10));
+        assert_eq!(hex_nibble(b'F'), Some(15));
+    }
+
+    #[test]
+    fn hex_nibble_invalid_chars() {
+        // 边界外字符
+        assert_eq!(hex_nibble(b'g'), None);
+        assert_eq!(hex_nibble(b'G'), None);
+        assert_eq!(hex_nibble(b':'), None); // '9' 之后
+        assert_eq!(hex_nibble(b'`'), None); // 'a' 之前
+        assert_eq!(hex_nibble(b'@'), None); // 'A' 之前
+        // 控制字符与高字节
+        assert_eq!(hex_nibble(0), None);
+        assert_eq!(hex_nibble(b'\n'), None);
+        assert_eq!(hex_nibble(b' '), None);
+        assert_eq!(hex_nibble(0xFF), None);
+    }
+
+    #[test]
+    fn hex_nibble_full_ascii_range() {
+        // 遍历所有 ASCII 字符，验证只有合法 hex 字符返回 Some
+        for b in 0u8..=127u8 {
+            let r = hex_nibble(b);
+            match b {
+                b'0'..=b'9' => assert_eq!(r, Some(b - b'0')),
+                b'a'..=b'f' => assert_eq!(r, Some(b - b'a' + 10)),
+                b'A'..=b'F' => assert_eq!(r, Some(b - b'A' + 10)),
+                _ => assert_eq!(r, None),
+            }
+        }
+    }
+
+    // ---------- trim_ascii_whitespace ----------
+
+    #[test]
+    fn trim_ascii_whitespace_empty() {
+        assert_eq!(trim_ascii_whitespace(b""), b"");
+    }
+
+    #[test]
+    fn trim_ascii_whitespace_no_whitespace() {
+        assert_eq!(trim_ascii_whitespace(b"hello"), b"hello");
+    }
+
+    #[test]
+    fn trim_ascii_whitespace_leading_only() {
+        assert_eq!(trim_ascii_whitespace(b"   hello"), b"hello");
+    }
+
+    #[test]
+    fn trim_ascii_whitespace_trailing_only() {
+        assert_eq!(trim_ascii_whitespace(b"hello   "), b"hello");
+    }
+
+    #[test]
+    fn trim_ascii_whitespace_both_sides() {
+        assert_eq!(trim_ascii_whitespace(b"\t hello world \n"), b"hello world");
+    }
+
+    #[test]
+    fn trim_ascii_whitespace_all_whitespace_becomes_empty() {
+        assert_eq!(trim_ascii_whitespace(b"   \t\n\r   "), b"");
+    }
+
+    #[test]
+    fn trim_ascii_whitespace_internal_preserved() {
+        // 内部空白应被保留，仅裁剪首尾
+        assert_eq!(trim_ascii_whitespace(b"  a  b  c  "), b"a  b  c");
+    }
+
+    #[test]
+    fn trim_ascii_whitespace_all_ascii_whitespace_kinds() {
+        // 空格、\t、\n、\r、\x0c (form feed)、\x0b (vertical tab) 均为 ASCII 空白
+        assert_eq!(trim_ascii_whitespace(b"\x0b\x0c\t\n\r abc \r\n\t\x0c\x0b"), b"abc");
+    }
+
+    #[test]
+    fn trim_ascii_whitespace_single_char() {
+        assert_eq!(trim_ascii_whitespace(b"x"), b"x");
+        assert_eq!(trim_ascii_whitespace(b" "), b"");
+    }
+
+    // ---------- parse_oid_swapped ----------
+
+    #[test]
+    fn parse_oid_swapped_known_value_word_swap() {
+        // 输入字节按 4 字节为一组，组内字节反序输出
+        // raw = [01,02,03,04 | 05,06,07,08 | 09,0a,0b,0c | 0d,0e,0f,10 | 11,12,13,14]
+        let hex = "0102030405060708090a0b0c0d0e0f1011121314";
+        let out = parse_oid_swapped(hex).unwrap();
+        let expected = [
+            0x04, 0x03, 0x02, 0x01, // word 0 反序
+            0x08, 0x07, 0x06, 0x05, // word 1 反序
+            0x0c, 0x0b, 0x0a, 0x09, // word 2 反序
+            0x10, 0x0f, 0x0e, 0x0d, // word 3 反序
+            0x14, 0x13, 0x12, 0x11, // word 4 反序
+        ];
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn parse_oid_swapped_all_zeros() {
+        let out = parse_oid_swapped("0000000000000000000000000000000000000000").unwrap();
+        assert_eq!(out, [0u8; 20]);
+    }
+
+    #[test]
+    fn parse_oid_swapped_all_ff() {
+        let out = parse_oid_swapped("ffffffffffffffffffffffffffffffffffffffff").unwrap();
+        assert_eq!(out, [0xFFu8; 20]);
+    }
+
+    #[test]
+    fn parse_oid_swapped_palindrome_word_unchanged() {
+        // 回文 word（如 ab cd cd ab）反序后不变
+        let hex = "abcdcdababcdcdababcdcdababcdcdababcdcdab";
+        let out = parse_oid_swapped(hex).unwrap();
+        // 还原回字节应与输入一致
+        let raw: Vec<u8> = (0..20).map(|i| {
+            let hi = hex_nibble(hex.as_bytes()[i * 2]).unwrap();
+            let lo = hex_nibble(hex.as_bytes()[i * 2 + 1]).unwrap();
+            (hi << 4) | lo
+        }).collect();
+        assert_eq!(&out[..], &raw[..], "回文 word 反序后应不变");
+    }
+
+    #[test]
+    fn parse_oid_swapped_too_short_returns_err() {
+        assert!(parse_oid_swapped("0102030405060708090a0b0c0d0e0f101112131").is_err());
+    }
+
+    #[test]
+    fn parse_oid_swapped_too_long_returns_err() {
+        // len != 40 都返回错误
+        assert!(parse_oid_swapped("0102030405060708090a0b0c0d0e0f101112131415").is_err());
+    }
+
+    #[test]
+    fn parse_oid_swapped_empty_returns_err() {
+        assert!(parse_oid_swapped("").is_err());
+    }
+
+    #[test]
+    fn parse_oid_swapped_invalid_char_returns_err() {
+        // 40 字符长度但含非法字符
+        assert!(parse_oid_swapped("gggggggggggggggggggggggggggggggggggggggg").is_err());
+        assert!(parse_oid_swapped("0102030405060708090a0b0c0d0e0f101112131z").is_err());
+    }
+
+    #[test]
+    fn parse_oid_swapped_uppercase_accepted() {
+        // 大写字母应被接受
+        let out_lower = parse_oid_swapped("abcdefabcdefabcdefabcdefabcdefabcdefabcd").unwrap();
+        let out_upper = parse_oid_swapped("ABCDEFABCDEFABCDEFABCDEFABCDEFABCDEFABCD").unwrap();
+        assert_eq!(out_lower, out_upper);
+    }
+
+    #[test]
+    fn parse_oid_swapped_each_word_independent() {
+        // 仅修改 word 2 不应影响其他 word 的反序结果
+        let base = parse_oid_swapped("0102030405060708090a0b0c0d0e0f1011121314").unwrap();
+        let modified = parse_oid_swapped("0102030405060708ffffffff0d0e0f1011121314").unwrap();
+        assert_eq!(&base[0..8], &modified[0..8], "word 0/1 不应变化");
+        assert_ne!(&base[8..12], &modified[8..12], "word 2 应变化");
+        assert_eq!(&base[12..20], &modified[12..20], "word 3/4 不应变化");
+    }
+}
+

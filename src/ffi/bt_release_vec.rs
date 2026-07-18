@@ -89,3 +89,37 @@ pub unsafe extern "C" fn bt_release_parse_patch(buf: *mut BtBuf) {
 pub unsafe extern "C" fn bt_release_search_commits(buf: *mut BtBuf) {
     unsafe { release_btbuf(buf) }
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    // 这些测试仅在 Windows 平台下编译运行（依赖 kernel32 的 HeapFree）。
+    // Linux 沙箱无法链接 kernel32，故此模块在 Linux 上为空。
+    use super::*;
+
+    #[test]
+    fn release_btbuf_null_is_safe() {
+        // 传入 null 指针应直接返回，不触发任何解引用
+        unsafe { release_btbuf(core::ptr::null_mut()) };
+    }
+
+    #[test]
+    fn release_btbuf_zero_cap_is_safe() {
+        // cap == 0 时不应尝试 HeapFree（即使 ptr 非 null）
+        let mut buf = BtBuf { ptr: core::ptr::null_mut(), len: 0, cap: 0 };
+        unsafe { release_btbuf(&mut buf) };
+    }
+
+    #[test]
+    fn all_public_release_functions_accept_null() {
+        // 每个公开的 release 函数都应安全接受 null
+        unsafe {
+            bt_release_behind_ahead_counts(core::ptr::null_mut());
+            bt_release_committer_times(core::ptr::null_mut());
+            bt_release_decode_image(core::ptr::null_mut());
+            bt_release_highlight_syntax(core::ptr::null_mut());
+            bt_release_layout_treemap(core::ptr::null_mut());
+            bt_release_parse_patch(core::ptr::null_mut());
+            bt_release_search_commits(core::ptr::null_mut());
+        }
+    }
+}

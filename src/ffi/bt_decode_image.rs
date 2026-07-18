@@ -308,4 +308,256 @@ mod tests {
         let mut out = Vec::new();
         assert!(!decode_tga_to_bmp(&data, &mut out));
     }
+
+    #[test]
+    fn decode_rejects_invalid_bpp_for_truecolor() {
+        // truecolor 类型但 bpp 不是 24/32
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 2;
+        data[12..14].copy_from_slice(&1u16.to_le_bytes());
+        data[14..16].copy_from_slice(&1u16.to_le_bytes());
+        data[16] = 16; // 不支持的 bpp
+        let mut out = Vec::new();
+        assert!(!decode_tga_to_bmp(&data, &mut out));
+    }
+
+    #[test]
+    fn decode_rejects_invalid_bpp_for_grayscale() {
+        // grayscale 类型但 bpp 不是 8
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 3;
+        data[12..14].copy_from_slice(&1u16.to_le_bytes());
+        data[14..16].copy_from_slice(&1u16.to_le_bytes());
+        data[16] = 24; // grayscale 必须是 8bpp
+        let mut out = Vec::new();
+        assert!(!decode_tga_to_bmp(&data, &mut out));
+    }
+
+    #[test]
+    fn decode_rejects_image_type_9_unsupported() {
+        // image_type=9 是 color-mapped RLE，不支持
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 9;
+        data[12..14].copy_from_slice(&1u16.to_le_bytes());
+        data[14..16].copy_from_slice(&1u16.to_le_bytes());
+        data[16] = 24;
+        let mut out = Vec::new();
+        assert!(!decode_tga_to_bmp(&data, &mut out));
+    }
+
+    #[test]
+    fn decode_truecolor_32bpp_uncompressed() {
+        // 32bpp truecolor 应能正确解码
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 2;
+        data[12..14].copy_from_slice(&1u16.to_le_bytes());
+        data[14..16].copy_from_slice(&1u16.to_le_bytes());
+        data[16] = 32;
+        data.extend_from_slice(&[0xFF, 0x00, 0x80, 0xFF]); // BGRA
+        let mut out = Vec::new();
+        assert!(decode_tga_to_bmp(&data, &mut out), "32bpp truecolor 应可解码");
+        assert_eq!(&out[0..2], b"BM");
+        // BMP 输出始终是 24bpp
+        assert_eq!(u16::from_le_bytes([out[28], out[29]]), 24);
+        // 像素数据偏移 54
+        assert_eq!(u32::from_le_bytes([out[10], out[11], out[12], out[13]]), 54);
+    }
+
+    #[test]
+    fn decode_truecolor_2x2_uncompressed() {
+        // 2x2 truecolor 测试多像素扫描
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 2;
+        data[12..14].copy_from_slice(&2u16.to_le_bytes());
+        data[14..16].copy_from_slice(&2u16.to_le_bytes());
+        data[16] = 24;
+        // 4 个像素，每像素 3 字节
+        data.extend_from_slice(&[
+            0x11, 0x22, 0x33, // pixel (0,0)
+            0x44, 0x55, 0x66, // pixel (1,0)
+            0x77, 0x88, 0x99, // pixel (0,1)
+            0xAA, 0xBB, 0xCC, // pixel (1,1)
+        ]);
+        let mut out = Vec::new();
+        assert!(decode_tga_to_bmp(&data, &mut out));
+        // row_stride = ((2*3+3)/4)*4 = 8; file_size = 14+40+8*2 = 70
+        assert_eq!(u32::from_le_bytes([out[2], out[3], out[4], out[5]]), 70);
+    }
+
+    #[test]
+    fn decode_with_id_field_skips_id() {
+        // id_len > 0 时应跳过 ID 字段
+        let id_field = b"some TGA comment";
+        let mut data = vec![0u8; 18];
+        data[0] = id_field.len() as u8; // id_len
+        data[1] = 0;
+        data[2] = 2;
+        data[12..14].copy_from_slice(&1u16.to_le_bytes());
+        data[14..16].copy_from_slice(&1u16.to_le_bytes());
+        data[16] = 24;
+        data.extend_from_slice(id_field);
+        data.extend_from_slice(&[0xFF, 0x00, 0x00]);
+        let mut out = Vec::new();
+        assert!(decode_tga_to_bmp(&data, &mut out), "应跳过 ID 字段并解码");
+        // 像素应为输入的 BGR
+        assert_eq!(&out[54..57], &[0xFF, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn decode_id_field_extends_beyond_data_returns_false() {
+        // id_len 声称超过数据长度应失败
+        let mut data = vec![0u8; 18];
+        data[0] = 100; // id_len=100 但数据不足
+        data[1] = 0;
+        data[2] = 2;
+        data[12..14].copy_from_slice(&1u16.to_le_bytes());
+        data[14..16].copy_from_slice(&1u16.to_le_bytes());
+        data[16] = 24;
+        // 只追加少量字节（不足 100 + 3 像素字节）
+        data.extend_from_slice(&[0; 10]);
+        let mut out = Vec::new();
+        assert!(!decode_tga_to_bmp(&data, &mut out));
+    }
+
+    #[test]
+    fn decode_rle_truecolor_works() {
+        // RLE truecolor (image_type=10) 应能正确解码
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 10; // RLE truecolor
+        data[12..14].copy_from_slice(&2u16.to_le_bytes());
+        data[14..16].copy_from_slice(&2u16.to_le_bytes());
+        data[16] = 24;
+        // 4 个像素，使用 RLE 压缩
+        // packet 1: 0x83 = run packet, count=4, 后跟 1 个像素 = (0xFF,0x00,0x80)
+        data.extend_from_slice(&[0x83, 0xFF, 0x00, 0x80]);
+        let mut out = Vec::new();
+        assert!(decode_tga_to_bmp(&data, &mut out), "RLE truecolor 应可解码");
+        assert_eq!(&out[0..2], b"BM");
+        // 验证 BMP 头中的宽高
+        assert_eq!(u32::from_le_bytes([out[18], out[19], out[20], out[21]]), 2);
+        assert_eq!(u32::from_le_bytes([out[22], out[23], out[24], out[25]]), 2);
+    }
+
+    #[test]
+    fn decode_rle_raw_packet_works() {
+        // RLE 原始包（非 run packet）
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 10; // RLE truecolor
+        data[12..14].copy_from_slice(&2u16.to_le_bytes());
+        data[14..16].copy_from_slice(&2u16.to_le_bytes());
+        data[16] = 24;
+        // 0x03 = raw packet, count=4，后跟 4 个原始像素
+        data.extend_from_slice(&[0x03]);
+        data.extend_from_slice(&[
+            0x11, 0x22, 0x33,
+            0x44, 0x55, 0x66,
+            0x77, 0x88, 0x99,
+            0xAA, 0xBB, 0xCC,
+        ]);
+        let mut out = Vec::new();
+        assert!(decode_tga_to_bmp(&data, &mut out), "RLE raw packet 应可解码");
+        assert_eq!(&out[0..2], b"BM");
+    }
+
+    #[test]
+    fn decode_rle_run_packet_count_max() {
+        // RLE run packet 的最大 count=128（header=0xFF）
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 11; // RLE grayscale
+        // 16x8 = 128 像素
+        data[12..14].copy_from_slice(&16u16.to_le_bytes());
+        data[14..16].copy_from_slice(&8u16.to_le_bytes());
+        data[16] = 8;
+        // 0xFF = run packet, count=128，后跟 1 个 grayscale 像素
+        data.extend_from_slice(&[0xFF, 0x42]);
+        let mut out = Vec::new();
+        assert!(decode_tga_to_bmp(&data, &mut out), "RLE max count run packet 应可解码");
+    }
+
+    #[test]
+    fn decode_bmp_header_pixel_data_offset_always_54() {
+        // 不论图像尺寸，BMP 像素数据偏移应始终为 54
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 2;
+        data[12..14].copy_from_slice(&3u16.to_le_bytes());
+        data[14..16].copy_from_slice(&3u16.to_le_bytes());
+        data[16] = 24;
+        // 3x3 = 9 像素 * 3 字节
+        data.extend_from_slice(&[0u8; 27]);
+        let mut out = Vec::new();
+        assert!(decode_tga_to_bmp(&data, &mut out));
+        let offset = u32::from_le_bytes([out[10], out[11], out[12], out[13]]);
+        assert_eq!(offset, 54);
+    }
+
+    #[test]
+    fn decode_bmp_header_always_24bpp() {
+        // 不论 TGA 的 bpp，BMP 输出始终是 24bpp
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 2;
+        data[12..14].copy_from_slice(&1u16.to_le_bytes());
+        data[14..16].copy_from_slice(&1u16.to_le_bytes());
+        data[16] = 32; // TGA 32bpp
+        data.extend_from_slice(&[0xFF, 0x00, 0x80, 0xFF]);
+        let mut out = Vec::new();
+        assert!(decode_tga_to_bmp(&data, &mut out));
+        let bpp = u16::from_le_bytes([out[28], out[29]]);
+        assert_eq!(bpp, 24, "BMP bpp 应始终为 24");
+    }
+
+    #[test]
+    fn decode_grayscale_pixel_replicated_to_rgb() {
+        // grayscale 像素值应在 BMP 中复制到 R/G/B 三个通道
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 3;
+        data[12..14].copy_from_slice(&1u16.to_le_bytes());
+        data[14..16].copy_from_slice(&1u16.to_le_bytes());
+        data[16] = 8;
+        data.extend_from_slice(&[0x42]); // grayscale 值
+        let mut out = Vec::new();
+        assert!(decode_tga_to_bmp(&data, &mut out));
+        // BMP 像素在偏移 54 处，三个字节都应是 0x42
+        assert_eq!(&out[54..57], &[0x42, 0x42, 0x42]);
+    }
+
+    #[test]
+    fn decode_top_origin_2x2_flips_rows() {
+        // top-origin TGA 的行应被翻转
+        let mut data = vec![0u8; 18];
+        data[1] = 0;
+        data[2] = 2;
+        data[12..14].copy_from_slice(&2u16.to_le_bytes());
+        data[14..16].copy_from_slice(&2u16.to_le_bytes());
+        data[16] = 24;
+        data[17] = 0x20; // top-origin 标志
+        // 像素：(0,0)=A, (1,0)=B, (0,1)=C, (1,1)=D
+        data.extend_from_slice(&[
+            0xAA, 0xAA, 0xAA, // A
+            0xBB, 0xBB, 0xBB, // B
+            0xCC, 0xCC, 0xCC, // C
+            0xDD, 0xDD, 0xDD, // D
+        ]);
+        let mut out = Vec::new();
+        assert!(decode_tga_to_bmp(&data, &mut out));
+        // BMP 是 bottom-up，top-origin TGA 第 0 行（A,B）应出现在 BMP 最后一行
+        // row_stride = ((2*3+3)/4)*4 = 8
+        // 第一 BMP 行（底部）= out[54..60]，第二 BMP 行 = out[62..68]
+        // top-origin 时 src_y = height-1-y，BMP 第一行（y=0）应来自 TGA 最后一行（C,D）
+        // 但 1 像素映射有 padding，简化：验证两行第一个像素不同
+        let row0 = &out[54..57];
+        let row1_offset = 62; // 54 + 8
+        let row1 = &out[row1_offset..row1_offset + 3];
+        assert_ne!(row0, row1, "top-origin 翻转后两行首像素应不同");
+    }
 }

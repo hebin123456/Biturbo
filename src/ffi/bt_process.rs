@@ -620,4 +620,69 @@ mod tests {
             assert!(legacy_vec_capacity(n) >= n, "capacity < len for n={n}");
         }
     }
+
+    #[test]
+    fn legacy_vec_capacity_transitions_across_powers_of_two() {
+        // 每个二次幂 N 处：N-1 向上取整到 N，N 本身保持 N，N+1 向上取整到 2N
+        for &pow in &[16usize, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
+            assert_eq!(legacy_vec_capacity(pow - 1), pow, "pow-1 应取整到 {pow}");
+            assert_eq!(legacy_vec_capacity(pow), pow, "{pow} 本身保持不变");
+            assert_eq!(legacy_vec_capacity(pow + 1), pow * 2, "pow+1 应取整到 {}", pow * 2);
+        }
+    }
+
+    #[test]
+    fn legacy_vec_capacity_sub_floor_values_all_collapse_to_16() {
+        // 所有小于 16 的输入都被地板值 16 覆盖
+        for n in 0usize..16 {
+            assert_eq!(legacy_vec_capacity(n), 16, "n={n} 应被地板值 16 覆盖");
+        }
+    }
+
+    #[test]
+    fn legacy_vec_capacity_is_monotonic_non_decreasing() {
+        // 在 0..=2048 范围内，capacity 不应随输入增大而减小
+        let mut prev = 0usize;
+        for n in 0usize..=2048 {
+            let cur = legacy_vec_capacity(n);
+            assert!(cur >= prev, "capacity 在 n={n} 处下降: prev={prev} cur={cur}");
+            prev = cur;
+        }
+    }
+
+    #[test]
+    fn legacy_vec_capacity_power_of_two_is_fixed_point() {
+        // 任意二次幂输入应返回自身（与 next_power_of_two 的不动点性质一致）
+        for shift in 4usize..=20 {
+            let p = 1usize << shift;
+            assert_eq!(legacy_vec_capacity(p), p, "1<<{shift}={p} 应为不动点");
+        }
+    }
+
+    #[test]
+    fn legacy_vec_capacity_returns_power_of_two_or_floor() {
+        // 任何返回值要么是 16（地板），要么是某个二次幂
+        for n in 0usize..4096 {
+            let c = legacy_vec_capacity(n);
+            assert!(c == 16 || c.is_power_of_two(), "n={n} 返回非二次幂 {c}");
+        }
+    }
+
+    #[test]
+    fn legacy_vec_capacity_large_value_no_panic() {
+        // 较大输入不应 panic（仅取 usize 上界的一半以内）
+        let big = 1usize << 40;
+        assert_eq!(legacy_vec_capacity(big), big);
+        assert_eq!(legacy_vec_capacity(big - 1), big);
+        assert_eq!(legacy_vec_capacity(big + 1), big * 2);
+    }
+
+    #[test]
+    fn legacy_vec_capacity_result_always_multiple_of_power_of_two() {
+        // 返回值在二进制下应只有一位为 1（或等于地板 16，同样满足）
+        for n in [0usize, 1, 5, 16, 17, 100, 1000, 100_000] {
+            let c = legacy_vec_capacity(n);
+            assert_eq!(c.count_ones(), 1, "n={n} 返回 {c} 不是 2 的幂");
+        }
+    }
 }

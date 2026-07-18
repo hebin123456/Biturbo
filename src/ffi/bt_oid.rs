@@ -108,10 +108,43 @@ mod tests {
 
     #[test]
     fn hex_nibble_boundary() {
-        // Boundary between decimal and hex ranges
-        assert_eq!(hex_nibble(b'/'), None); // before '0'
-        assert_eq!(hex_nibble(b'`'), None); // before 'a'
-        assert_eq!(hex_nibble(b'@'), None); // before 'A'
+        // 各区间右边界：'9' -> ':' 之间过渡
+        assert_eq!(hex_nibble(b':'), None); // char just after '9'
+        // 字母区间右边界：'f' 之后是 'g'
+        assert_eq!(hex_nibble(b'g'), None);
+        assert_eq!(hex_nibble(b'G'), None);
+        // NUL、换行、tab 等控制字符
+        assert_eq!(hex_nibble(0), None);
+        assert_eq!(hex_nibble(b'\n'), None);
+        assert_eq!(hex_nibble(b'\t'), None);
+        // 高位字节（非 ASCII）
+        assert_eq!(hex_nibble(0xFF), None);
+        assert_eq!(hex_nibble(0x80), None);
+    }
+
+    #[test]
+    fn hex_nibble_full_range_coverage() {
+        // 遍历所有 ASCII 字符，验证只有合法 hex 字符返回 Some
+        for b in 0u8..=127u8 {
+            let r = hex_nibble(b);
+            match b {
+                b'0'..=b'9' => assert_eq!(r, Some(b - b'0'), "dec {b}"),
+                b'a'..=b'f' => assert_eq!(r, Some(b - b'a' + 10), "lower {b}"),
+                b'A'..=b'F' => assert_eq!(r, Some(b - b'A' + 10), "upper {b}"),
+                _ => assert_eq!(r, None, "non-hex {b}"),
+            }
+        }
+    }
+
+    #[test]
+    fn hex_nibble_value_range() {
+        // 数字的值域是 0..=9，字母的值域是 10..=15
+        assert_eq!(hex_nibble(b'0').unwrap(), 0);
+        assert_eq!(hex_nibble(b'9').unwrap(), 9);
+        assert_eq!(hex_nibble(b'a').unwrap(), 10);
+        assert_eq!(hex_nibble(b'f').unwrap(), 15);
+        assert_eq!(hex_nibble(b'A').unwrap(), 10);
+        assert_eq!(hex_nibble(b'F').unwrap(), 15);
     }
 }
 

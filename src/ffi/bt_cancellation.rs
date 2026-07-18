@@ -135,3 +135,147 @@ pub unsafe extern "C" fn bt_release_cancellation_token(token: *mut *mut u8) {
         unsafe { heap_free_u8(p) };
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ptr;
+
+    // 以下测试覆盖 register_token / unregister_and_null_token /
+    // is_token_active_and_canceled 三个纯逻辑函数。
+    // 这些函数仅操作全局 HashSet 与指针读写，不依赖 winheap，
+    // 因此在 Linux 沙箱上也可编译运行。
+    // 每个测试使用各自栈上的字节作为“令牌内存”，并在结束时调用
+    // unregister 清理，避免污染全局活动集合。
+
+    #[test]
+    fn register_token_null_is_noop() {
+        // register_token 对 null 不应做任何事，也不会 panic
+        register_token(ptr::null_mut());
+    }
+
+    #[test]
+    fn is_canceled_null_token_ptr_returns_false() {
+        // token_ptr_ptr 为 null 时直接返回 false
+        assert!(!is_token_active_and_canceled(ptr::null_mut()));
+    }
+
+    #[test]
+    fn is_canceled_null_inner_returns_false() {
+        // *token_ptr_ptr 为 null 时返回 false
+        let mut inner: *mut u8 = ptr::null_mut();
+        let token_ptr = &mut inner as *mut *mut u8;
+        assert!(!is_token_active_and_canceled(token_ptr));
+    }
+
+    #[test]
+    fn unregister_null_token_returns_null() {
+        // token 为 null 时返回 null
+        assert!(unregister_and_null_token(ptr::null_mut()).is_null());
+    }
+
+    #[test]
+    fn unregister_null_inner_returns_null() {
+        // *token 为 null 时返回 null，且不修改 *token
+        let mut inner: *mut u8 = ptr::null_mut();
+        let token_ptr = &mut inner as *mut *mut u8;
+        let result = unregister_and_null_token(token_ptr);
+        assert!(result.is_null());
+        assert!(inner.is_null(), "*token 应仍为 null");
+    }
+
+    #[test]
+    fn register_then_unregister_roundtrip() {
+        // 注册一个指针后应能成功取消注册并取回原指针
+        let mut byte: u8 = 0;
+        let ptr_byte = &mut byte as *mut u8;
+        register_token(ptr_byte);
+        let mut inner = ptr_byte;
+        let token_ptr = &mut inner as *mut *mut u8;
+        let recovered = unregister_and_null_token(token_ptr);
+        assert_eq!(recovered, ptr_byte, "应取回原指针");
+        assert!(inner.is_null(), "unregister 后 *token 应被置 null");
+    }
+
+    #[test]
+    fn unregister_not_in_set_returns_null() {
+        // 未注册的指针应返回 null，且不修改 *token
+        let mut byte: u8 = 0;
+        let ptr_byte = &mut byte as *mut u8;
+        let mut inner = ptr_byte;
+        let token_ptr = &mut inner as *mut *mut u8;
+        let result = unregister_and_null_token(token_ptr);
+        assert!(result.is_null(), "未注册的指针应返回 null");
+        assert_eq!(inner, ptr_byte, "*token 不应被修改");
+    }
+
+    #[test]
+    fn is_canceled_unregistered_pointer_returns_false() {
+        // 指针不在活动集合中时返回 false，即使 *inner != 0
+        let mut byte: u8 = 1; // 模拟“已取消”
+        let ptr_byte = &mut byte as *mut u8;
+        let mut inner = ptr_byte;
+        let token_ptr = &mut inner as *mut *mut u8;
+        assert!(!is_token_active_and_canceled(token_ptr), "未注册指针不应视为已取消");
+    }
+
+    #[test]
+    fn is_canceled_registered_zero_byte_returns_false() {
+        // 已注册但 *inner == 0 时返回 false
+        let mut byte: u8 = 0;
+        let ptr_byte = &mut byte as *mut u8;
+        register_token(ptr_byte);
+        let mut inner = ptr_byte;
+        let token_ptr = &mut inner as *mut *mut u8;
+        let result = is_token_active_and_canceled(token_ptr);
+        // 清理：取消注册
+        let _ = unregister_and_null_token(token_ptr);
+        assert!(!result, "已注册但未取消应返回 false");
+    }
+
+    #[test]
+    fn is_canceled_registered_nonzero_byte_returns_true() {
+        // 已注册且 *inner != 0 时返回 true
+        let mut byte: u8 = 0;
+        let ptr_byte = &mut byte as *mut u8;
+        register_token(ptr_byte);
+        // 模拟取消：写 1
+        unsafe { *ptr_byte = 1; }
+        let mut inner = ptr_byte;
+        let token_ptr = &mut inner as *mut *mut u8;
+        let result = is_token_active_and_canceled(token_ptr);
+        // 清理：先把字节置回 0，再取消注册
+        unsafe { *ptr_byte = 0; }
+        let _ = unregister_and_null_token(token_ptr);
+        assert!(result, "已注册且 *inner != 0 应返回 true");
+    }
+
+    #[test]
+    fn double_unregister_second_returns_null() {
+        // 重复取消注册：第一次成功，第二次返回 null
+        let mut byte: u8 = 0;
+        let ptr_byte = &mut byte as *mut u8;
+        register_token(ptr_byte);
+        let mut inner = ptr_byte;
+        let token_ptr = &mut inner as *mut *mut u8;
+        let first = unregister_and_null_token(token_ptr);
+        assert_eq!(first, ptr_byte, "第一次应成功取回");
+        assert!(inner.is_null(), "*token 应被置 null");
+        let second = unregister_and_null_token(token_ptr);
+        assert!(second.is_null(), "第二次应返回 null");
+    }
+
+    #[test]
+    fn register_same_pointer_twice_is_idempotent_in_set() {
+        // HashSet 重复 insert 同一指针：集合大小不变，unregister 仍能取回
+        let mut byte: u8 = 0;
+        let ptr_byte = &mut byte as *mut u8;
+        register_token(ptr_byte);
+        register_token(ptr_byte); // 重复注册
+        let mut inner = ptr_byte;
+        let token_ptr = &mut inner as *mut *mut u8;
+        let recovered = unregister_and_null_token(token_ptr);
+        assert_eq!(recovered, ptr_byte, "重复注册后仍应能取回");
+        assert!(inner.is_null());
+    }
+}

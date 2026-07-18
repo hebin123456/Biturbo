@@ -7,7 +7,7 @@ license = "MIT"
 
 [lib]
 name = "biturbo"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 libz-sys = { version = "1.1", default-features = true }
@@ -15,4 +15,9 @@ markdown = { version = "=1.0.0", default-features = true }
 toml = "1.1.2"
 serde = { version = "1.0", features = ["derive"] }
 git2 = { version = "0.21.0", features = ["vendored-libgit2"] }
+
+[dev-dependencies]
+# git2 已在 [dependencies] 中声明，这里只为集成测试显式启用。
+# Cargo 会合并 dependencies 与 dev-dependencies，无需重复声明 git2。
+tempfile = "3"
 

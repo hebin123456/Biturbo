@@ -474,5 +474,133 @@ mod tests {
             assert_item_close(item, expected);
         }
     }
+
+    #[test]
+    fn empty_input_returns_empty() {
+        // 空输入应返回空 Vec
+        let items = call(&[], BtRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 });
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn single_node_fills_rect() {
+        // 单节点应填满整个矩形（宽度方向）
+        let items = call(&[42], BtRect { x: 0.0, y: 0.0, w: 100.0, h: 50.0 });
+        assert_eq!(items.len(), 1);
+        // 单节点 fill 整个 rect，w=100, h=50（沿较长边）
+        assert_item_close(&items[0], (0, 0.0, 0.0, 100.0, 50.0));
+    }
+
+    #[test]
+    fn single_node_tall_rect_fills_height() {
+        // 高大于宽时，单节点应沿高度方向填充
+        let items = call(&[42], BtRect { x: 0.0, y: 0.0, w: 50.0, h: 100.0 });
+        assert_eq!(items.len(), 1);
+        assert_item_close(&items[0], (0, 0.0, 0.0, 50.0, 100.0));
+    }
+
+    #[test]
+    fn two_nodes_split_along_longer_dimension() {
+        // 两个节点沿较长边按比例分割
+        let items = call(&[30, 70], BtRect { x: 0.0, y: 0.0, w: 100.0, h: 50.0 });
+        assert_eq!(items.len(), 2);
+        // 总和 100，比例为 30/100 和 70/100
+        // 第一节点占 30% 宽度
+        assert!((items[0].rect.w - 30.0).abs() < 1e-6, "w0 应为 30: {:?}", items[0].rect);
+        // 第二节点占剩余 70% 宽度
+        assert!((items[1].rect.w - 70.0).abs() < 1e-6, "w1 应为 70: {:?}", items[1].rect);
+    }
+
+    #[test]
+    fn two_nodes_tall_rect_split_along_height() {
+        // 高度大于宽度时，两节点沿高度方向分割
+        let items = call(&[30, 70], BtRect { x: 0.0, y: 0.0, w: 50.0, h: 100.0 });
+        assert_eq!(items.len(), 2);
+        assert!((items[0].rect.h - 30.0).abs() < 1e-6);
+        assert!((items[1].rect.h - 70.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sorted_descending_by_size() {
+        // 输入乱序，输出 items 应按尺寸降序排列
+        let items = call(&[5, 100, 50, 1, 25], BtRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 });
+        // 第一项应是最大的 size=100，对应原 index=1
+        assert_eq!(items[0].index, 1);
+    }
+
+    #[test]
+    fn negative_size_treated_as_huge_unsigned() {
+        // 负数 i64 按 u64 解释为巨大正数，应排在最前
+        let items = call(&[-1, 100, 50], BtRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 });
+        // -1 as u64 是 u64::MAX，是最大值，对应原 index=0
+        assert_eq!(items[0].index, 0);
+    }
+
+    #[test]
+    fn aspect_helper_returns_infinity_for_zero_rect() {
+        // 零尺寸矩形应返回 INFINITY
+        let r = BtRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 };
+        assert!(legacy_aspect(1.0, 1.0, r).is_infinite());
+    }
+
+    #[test]
+    fn aspect_helper_returns_infinity_for_zero_ratio() {
+        let r = BtRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        assert!(legacy_aspect(0.0, 1.0, r).is_infinite());
+        assert!(legacy_aspect(1.0, 0.0, r).is_infinite());
+    }
+
+    #[test]
+    fn aspect_helper_returns_finite_for_valid_input() {
+        let r = BtRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 };
+        let a = legacy_aspect(1.0, 1.0, r);
+        assert!(a.is_finite(), "应有限: {a}");
+        assert!(a >= 1.0, "返回值应 >= 1.0: {a}");
+    }
+
+    #[test]
+    fn all_zero_with_two_nodes_returns_nan_for_one() {
+        // [0, 0] 两节点：denom=0 会产生 NaN
+        let items = call(&[0, 0], BtRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 });
+        assert_eq!(items.len(), 2);
+        // 不应 panic，结果可能是 NaN 但仍返回
+    }
+
+    #[test]
+    fn large_input_count_returns_one_per_node() {
+        // 大量节点应正确返回每个一个 item
+        let sizes: Vec<i64> = (1..=20).collect();
+        let items = call(&sizes, BtRect { x: 0.0, y: 0.0, w: 1000.0, h: 1000.0 });
+        assert_eq!(items.len(), 20);
+    }
+
+    #[test]
+    fn all_indices_present_in_output() {
+        // 所有输入索引都应在输出中恰好出现一次
+        let sizes = vec![10, 20, 30, 40, 50];
+        let items = call(&sizes, BtRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 });
+        let mut indices: Vec<i64> = items.iter().map(|i| i.index).collect();
+        indices.sort();
+        assert_eq!(indices, vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn square_rect_layout_completes() {
+        // 正方形矩形布局应完成且每个 item 矩形非负
+        let items = call(&[15, 25, 35, 45, 10, 5], BtRect { x: 0.0, y: 0.0, w: 100.0, h: 100.0 });
+        for item in &items {
+            assert!(item.rect.w >= 0.0 || item.rect.w.is_nan(), "w 不应为负: {:?}", item);
+            assert!(item.rect.h >= 0.0 || item.rect.h.is_nan(), "h 不应为负: {:?}", item);
+        }
+    }
+
+    #[test]
+    fn non_zero_origin_rect_preserved() {
+        // 非零起点矩形的 items 应落在矩形内或附近
+        let items = call(&[100, 50], BtRect { x: 10.0, y: 20.0, w: 100.0, h: 50.0 });
+        assert_eq!(items.len(), 2);
+        // 至少一个 item 的 x 应 >= 10（原点偏移生效）
+        assert!(items.iter().all(|i| i.rect.x >= 10.0 - 1e-6));
+    }
 }
 

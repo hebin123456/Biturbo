@@ -320,3 +320,152 @@ fn hex_nibble(b: u8) -> Option<u8> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // parse_sha_to_btoid 是纯函数：把 40 字符十六进制 SHA-1 解析为 BtOid。
+    // 输出经 BtOid::from_bytes 解释（按 4 字节大端 u32）。
+    // 不依赖 winheap 或 git2，可在 Linux 沙箱上直接测试。
+
+    #[test]
+    fn parse_sha_all_zeros() {
+        let oid = parse_sha_to_btoid("0000000000000000000000000000000000000000").unwrap();
+        assert_eq!((oid.s0, oid.s1, oid.s2, oid.s3, oid.s4), (0, 0, 0, 0, 0));
+    }
+
+    #[test]
+    fn parse_sha_all_f_lowercase() {
+        let oid = parse_sha_to_btoid("ffffffffffffffffffffffffffffffffffffffff").unwrap();
+        assert_eq!(oid.s0, 0xFFFFFFFF);
+        assert_eq!(oid.s1, 0xFFFFFFFF);
+        assert_eq!(oid.s2, 0xFFFFFFFF);
+        assert_eq!(oid.s3, 0xFFFFFFFF);
+        assert_eq!(oid.s4, 0xFFFFFFFF);
+    }
+
+    #[test]
+    fn parse_sha_all_f_uppercase() {
+        let oid = parse_sha_to_btoid("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF").unwrap();
+        assert_eq!(oid.s0, 0xFFFFFFFF);
+        assert_eq!(oid.s4, 0xFFFFFFFF);
+    }
+
+    #[test]
+    fn parse_sha_mixed_case() {
+        // 大小写混用应被接受，且结果与全小写一致
+        let lower = parse_sha_to_btoid("abcdef0123456789abcdef0123456789abcdef01").unwrap();
+        let mixed = parse_sha_to_btoid("AbCdEf0123456789abcdef0123456789abcdef01").unwrap();
+        assert_eq!(lower.s0, mixed.s0);
+        assert_eq!(lower, mixed);
+    }
+
+    #[test]
+    fn parse_sha_known_value_each_word() {
+        // 每个 word 取易识别的值，验证大端 u32 解释
+        let oid = parse_sha_to_btoid("0102030405060708090a0b0c0d0e0f1011121314").unwrap();
+        assert_eq!(oid.s0, 0x01020304);
+        assert_eq!(oid.s1, 0x05060708);
+        assert_eq!(oid.s2, 0x090a0b0c);
+        assert_eq!(oid.s3, 0x0d0e0f10);
+        assert_eq!(oid.s4, 0x11121314);
+    }
+
+    #[test]
+    fn parse_sha_leading_zeros_preserved() {
+        // 前导零不应丢失
+        let oid = parse_sha_to_btoid("0000000100000002000000030000000400000005").unwrap();
+        assert_eq!(oid.s0, 0x00000001);
+        assert_eq!(oid.s1, 0x00000002);
+        assert_eq!(oid.s2, 0x00000003);
+        assert_eq!(oid.s3, 0x00000004);
+        assert_eq!(oid.s4, 0x00000005);
+    }
+
+    #[test]
+    fn parse_sha_too_short_returns_none() {
+        assert!(parse_sha_to_btoid("000000000000000000000000000000000000000").is_none());
+    }
+
+    #[test]
+    fn parse_sha_too_long_returns_none() {
+        // 注意：parse_sha_to_btoid 用 len != 40 严格判等，多一个字符也返回 None
+        assert!(parse_sha_to_btoid("00000000000000000000000000000000000000000").is_none());
+    }
+
+    #[test]
+    fn parse_sha_empty_returns_none() {
+        assert!(parse_sha_to_btoid("").is_none());
+    }
+
+    #[test]
+    fn parse_sha_invalid_char_returns_none() {
+        // 含 'g' 等非十六进制字符
+        assert!(parse_sha_to_btoid("gggggggggggggggggggggggggggggggggggggggg").is_none());
+        // 仅末字符非法
+        assert!(parse_sha_to_btoid("000000000000000000000000000000000000000z").is_none());
+        // 含空格
+        assert!(parse_sha_to_btoid("0000000000 000000000000000000000000000000").is_none());
+    }
+
+    #[test]
+    fn parse_sha_roundtrip_with_to_bytes() {
+        // 解析后再 to_bytes 应还原为原始字节
+        let hex = "deadbeefcafebabe1234567890abcdefdeadbeef";
+        let oid = parse_sha_to_btoid(hex).unwrap();
+        let bytes = oid.to_bytes();
+        let reconstructed: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(reconstructed, hex);
+    }
+
+    #[test]
+    fn parse_sha_word_boundary_independence() {
+        // 修改第 0 个 word 不应影响其他 word
+        let base = parse_sha_to_btoid("0102030405060708090a0b0c0d0e0f1011121314").unwrap();
+        let modified = parse_sha_to_btoid("ffffffff05060708090a0b0c0d0e0f1011121314").unwrap();
+        assert_ne!(base.s0, modified.s0);
+        assert_eq!(base.s1, modified.s1);
+        assert_eq!(base.s2, modified.s2);
+        assert_eq!(base.s3, modified.s3);
+        assert_eq!(base.s4, modified.s4);
+    }
+
+    #[test]
+    fn parse_sha_exactly_40_chars_boundary() {
+        // 恰好 40 字符应成功（16+16+8 = 40）
+        let s = "0123456789abcdef0123456789abcdef01234567";
+        assert_eq!(s.len(), 40);
+        assert!(parse_sha_to_btoid(s).is_some());
+    }
+
+    #[test]
+    fn parse_sha_consistent_with_btoid_from_bytes() {
+        // parse_sha_to_btoid 结果应与手动 from_bytes 一致
+        let hex = "1234567890abcdef1234567890abcdef12345678";
+        let via_parse = parse_sha_to_btoid(hex).unwrap();
+        let mut raw = [0u8; 20];
+        for i in 0..20 {
+            let hi = hex_nibble(hex.as_bytes()[i * 2]).unwrap();
+            let lo = hex_nibble(hex.as_bytes()[i * 2 + 1]).unwrap();
+            raw[i] = (hi << 4) | lo;
+        }
+        let via_from_bytes = BtOid::from_bytes(raw);
+        assert_eq!(via_parse, via_from_bytes);
+    }
+
+    #[test]
+    fn hex_nibble_helper_boundaries() {
+        // 验证内部 hex_nibble 的边界行为
+        assert_eq!(hex_nibble(b'0'), Some(0));
+        assert_eq!(hex_nibble(b'9'), Some(9));
+        assert_eq!(hex_nibble(b'a'), Some(10));
+        assert_eq!(hex_nibble(b'f'), Some(15));
+        assert_eq!(hex_nibble(b'A'), Some(10));
+        assert_eq!(hex_nibble(b'F'), Some(15));
+        assert_eq!(hex_nibble(b'g'), None);
+        assert_eq!(hex_nibble(b'G'), None);
+        assert_eq!(hex_nibble(b':'), None);
+        assert_eq!(hex_nibble(b' '), None);
+    }
+}

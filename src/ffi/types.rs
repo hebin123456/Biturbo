@@ -184,5 +184,146 @@ mod tests {
         let oid = BtOid { s0: 1, s1: 2, s2: 3, s3: 4, s4: 5 };
         assert_eq!(format!("{oid:?}"), "BtOid { s0: 1, s1: 2, s2: 3, s3: 4, s4: 5 }");
     }
+
+    #[test]
+    fn btoid_roundtrip_pattern_alternating() {
+        // 0xAA 0x55 交替字节，验证每个 word 的边界
+        let mut bytes = [0u8; 20];
+        for i in 0..20 {
+            bytes[i] = if i % 2 == 0 { 0xAA } else { 0x55 };
+        }
+        let oid = BtOid::from_bytes(bytes);
+        assert_eq!(oid.to_bytes(), bytes);
+        // 每 4 字节 word 应为 0xAA55AA55
+        assert_eq!(oid.s0, 0xAA55AA55);
+        assert_eq!(oid.s1, 0xAA55AA55);
+        assert_eq!(oid.s2, 0xAA55AA55);
+        assert_eq!(oid.s3, 0xAA55AA55);
+        assert_eq!(oid.s4, 0xAA55AA55);
+    }
+
+    #[test]
+    fn btoid_each_word_isolated() {
+        // 仅设置某一个 word，验证 from_bytes/to_bytes 不串位
+        let make = |word: usize, value: u32| {
+            let mut bytes = [0u8; 20];
+            bytes[word * 4..word * 4 + 4].copy_from_slice(&value.to_be_bytes());
+            BtOid::from_bytes(bytes)
+        };
+        assert_eq!(make(0, 0xDEADBEEF).s0, 0xDEADBEEF);
+        assert_eq!(make(1, 0xDEADBEEF).s1, 0xDEADBEEF);
+        assert_eq!(make(2, 0xDEADBEEF).s2, 0xDEADBEEF);
+        assert_eq!(make(3, 0xDEADBEEF).s3, 0xDEADBEEF);
+        assert_eq!(make(4, 0xDEADBEEF).s4, 0xDEADBEEF);
+        // 其他 word 应保持 0
+        let oid = make(2, 0xDEADBEEF);
+        assert_eq!((oid.s0, oid.s1, oid.s3, oid.s4), (0, 0, 0, 0));
+    }
+
+    #[test]
+    fn btoid_eq_and_hash_consistent() {
+        let a = BtOid::from_bytes([1u8; 20]);
+        let b = BtOid::from_bytes([1u8; 20]);
+        let c = BtOid::from_bytes([2u8; 20]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        // Hash 应一致：相同值在不同内存位置也应产生相同 hash
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut ha = DefaultHasher::new();
+        let mut hb = DefaultHasher::new();
+        a.hash(&mut ha);
+        b.hash(&mut hb);
+        assert_eq!(ha.finish(), hb.finish());
+    }
+
+    #[test]
+    fn btoid_ordering_total_per_word() {
+        // 比较 s0 不同的情况
+        let a = BtOid { s0: 1, s1: 0, s2: 0, s3: 0, s4: 0 };
+        let b = BtOid { s0: 2, s1: 0, s2: 0, s3: 0, s4: 0 };
+        assert!(a < b);
+        // s0 相同、s1 不同：由 s1 决定
+        let c = BtOid { s0: 1, s1: 5, s2: 0, s3: 0, s4: 0 };
+        let d = BtOid { s0: 1, s1: 9, s2: 0, s3: 0, s4: 0 };
+        assert!(c < d);
+        // 完全相等：不小于
+        assert!(!(a < a));
+    }
+
+    #[test]
+    fn btoid_copy_does_not_alias() {
+        // Copy 语义：复制后修改副本不影响原件（用 to_bytes 间接验证）
+        let original = BtOid::from_bytes([7u8; 20]);
+        let copied = original;
+        // 如果是引用语义，下面这一行不会改变 original；Copy 应保证两者独立
+        let _ = copied.to_bytes();
+        assert_eq!(original.to_bytes(), [7u8; 20]);
+    }
+
+    #[test]
+    fn btbuf_default_fields_zero() {
+        // BtBuf 未实现 Default，但可手工构造“空”状态
+        let buf = BtBuf { ptr: core::ptr::null_mut(), len: 0, cap: 0 };
+        assert_eq!(buf.len, 0);
+        assert_eq!(buf.cap, 0);
+        assert!(buf.ptr.is_null());
+    }
+
+    #[test]
+    fn btbuf_is_copy() {
+        let buf = BtBuf { ptr: core::ptr::null_mut(), len: 42, cap: 100 };
+        let copied = buf;
+        // Copy 后字段值应一致
+        assert_eq!(copied.len, 42);
+        assert_eq!(copied.cap, 100);
+    }
+
+    #[test]
+    fn btrange_half_open_semantics() {
+        // 半开区间 [start, end)：start == end 表示空区间
+        let empty = BtRange { start: 5, end: 5 };
+        assert_eq!(empty.start, empty.end);
+
+        let r = BtRange { start: 0, end: 10 };
+        assert_eq!(r.end - r.start, 10);
+    }
+
+    #[test]
+    fn btrange_eq_and_copy() {
+        let a = BtRange { start: 1, end: 5 };
+        let b = a; // Copy
+        assert_eq!(a, b);
+        let c = BtRange { start: 1, end: 6 };
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn btreferences_default_zero_hash() {
+        // 手工构造空 BtReferences，hash 字段应为 0
+        let null_buf = BtBuf { ptr: core::ptr::null_mut(), len: 0, cap: 0 };
+        let refs = BtReferences {
+            a: null_buf,
+            b: null_buf,
+            c: null_buf,
+            d: null_buf,
+            e: null_buf,
+            hash: 0,
+        };
+        assert_eq!(refs.hash, 0);
+    }
+
+    #[test]
+    fn btgitconfig_layout_field_types() {
+        // 验证 BtGitConfig 字段类型与文档一致（不实际分配）
+        let cfg = BtGitConfig {
+            ptr: core::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        assert_eq!(cfg.len, 0);
+        assert_eq!(cfg.cap, 0);
+        assert!(cfg.ptr.is_null());
+    }
 }
 

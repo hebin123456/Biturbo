@@ -738,4 +738,198 @@ color = 3
         assert!(!toml_str.contains("alias"), "empty alias should be skipped");
         assert!(!toml_str.contains("opened"), "zero opened should be skipped");
     }
+
+    #[test]
+    fn toml_color_serializes_all_known_colors() {
+        // 验证每个颜色 1..=6 都能被正确序列化为名称
+        for c in 1..=6u8 {
+            let config = TomlConfig {
+                source_dirs: vec![],
+                scan_depth: 5,
+                ignore: vec![],
+                repositories: vec![TomlRepo {
+                    path: format!("/repo/{c}"),
+                    alias: String::new(),
+                    opened: 0,
+                    color: c,
+                }],
+                repositories_compat: Vec::new(),
+            };
+            let toml_str = toml::to_string(&config).unwrap();
+            let expected = format!("color = \"{}\"", color_to_name(c).unwrap());
+            assert!(toml_str.contains(&expected), "color {c} 未正确序列化: {toml_str}");
+        }
+    }
+
+    #[test]
+    fn toml_color_roundtrip_all_known_colors() {
+        // 每个颜色序列化后再反序列化应得到同样的值
+        for c in 1..=6u8 {
+            let config = TomlConfig {
+                source_dirs: vec![],
+                scan_depth: 5,
+                ignore: vec![],
+                repositories: vec![TomlRepo {
+                    path: "/r".to_string(),
+                    alias: String::new(),
+                    opened: 0,
+                    color: c,
+                }],
+                repositories_compat: Vec::new(),
+            };
+            let toml_str = toml::to_string(&config).unwrap();
+            let parsed: TomlConfig = toml::from_str(&toml_str).unwrap();
+            assert_eq!(parsed.repositories[0].color, c, "color {c} roundtrip 失败");
+        }
+    }
+
+    #[test]
+    fn toml_color_invalid_string_parses_as_zero() {
+        // 未知的颜色字符串应反序列化为 0
+        let toml_str = r#"
+source_dirs = []
+[[repository]]
+path = "/r"
+color = "Magenta"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.repositories[0].color, 0);
+    }
+
+    #[test]
+    fn toml_color_negative_integer_clamped_to_zero() {
+        // 负整数应被 max(0) 钳制为 0
+        let toml_str = r#"
+source_dirs = []
+[[repository]]
+path = "/r"
+color = -1
+"#;
+        let parsed: TomlConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.repositories[0].color, 0);
+    }
+
+    #[test]
+    fn toml_color_large_integer_truncates_to_u8() {
+        // 超过 u8 范围的整数应被截断为 u8
+        let toml_str = r#"
+source_dirs = []
+[[repository]]
+path = "/r"
+color = 300
+"#;
+        let parsed: TomlConfig = toml::from_str(toml_str).unwrap();
+        // 300 as u8 == 44
+        assert_eq!(parsed.repositories[0].color, 300u64 as u8);
+    }
+
+    #[test]
+    fn toml_empty_repositories_serializes_cleanly() {
+        // 空 repositories 列表序列化应不包含 [[repository]]
+        let config = TomlConfig {
+            source_dirs: vec!["/x".to_string()],
+            scan_depth: 1,
+            ignore: vec![],
+            repositories: vec![],
+            repositories_compat: Vec::new(),
+        };
+        let toml_str = toml::to_string(&config).unwrap();
+        assert!(!toml_str.contains("[[repository]]"));
+        assert!(!toml_str.contains("[[repositories]]"));
+        assert!(toml_str.contains("source_dirs"));
+    }
+
+    #[test]
+    fn toml_alias_roundtrip() {
+        // 非空 alias 应正确序列化和反序列化
+        let config = TomlConfig {
+            source_dirs: vec![],
+            scan_depth: 5,
+            ignore: vec![],
+            repositories: vec![TomlRepo {
+                path: "/r".to_string(),
+                alias: "my-alias".to_string(),
+                opened: 0,
+                color: 0,
+            }],
+            repositories_compat: Vec::new(),
+        };
+        let toml_str = toml::to_string(&config).unwrap();
+        assert!(toml_str.contains("alias = \"my-alias\""));
+        let parsed: TomlConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.repositories[0].alias, "my-alias");
+    }
+
+    #[test]
+    fn toml_opened_count_roundtrip() {
+        // opened 计数应正确序列化与反序列化
+        let config = TomlConfig {
+            source_dirs: vec![],
+            scan_depth: 5,
+            ignore: vec![],
+            repositories: vec![TomlRepo {
+                path: "/r".to_string(),
+                alias: String::new(),
+                opened: 42,
+                color: 0,
+            }],
+            repositories_compat: Vec::new(),
+        };
+        let toml_str = toml::to_string(&config).unwrap();
+        assert!(toml_str.contains("opened = 42"));
+        let parsed: TomlConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.repositories[0].opened, 42);
+    }
+
+    #[test]
+    fn toml_scan_depth_boundaries() {
+        // 验证 scan_depth 的边界值 0 和 255
+        for depth in [0u8, 1, 100, 254, 255] {
+            let toml_str = format!("scan_depth = {depth}\nsource_dirs = []\n");
+            let parsed: TomlConfig = toml::from_str(&toml_str).unwrap();
+            assert_eq!(parsed.scan_depth, depth, "scan_depth={depth} 解析失败");
+        }
+    }
+
+    #[test]
+    fn toml_multiple_repositories_preserve_order() {
+        // 多个 repository 应保持顺序
+        let config = TomlConfig {
+            source_dirs: vec![],
+            scan_depth: 5,
+            ignore: vec![],
+            repositories: vec![
+                TomlRepo { path: "/a".to_string(), alias: String::new(), opened: 0, color: 1 },
+                TomlRepo { path: "/b".to_string(), alias: String::new(), opened: 0, color: 2 },
+                TomlRepo { path: "/c".to_string(), alias: String::new(), opened: 0, color: 3 },
+            ],
+            repositories_compat: Vec::new(),
+        };
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: TomlConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.repositories.len(), 3);
+        assert_eq!(parsed.repositories[0].path, "/a");
+        assert_eq!(parsed.repositories[1].path, "/b");
+        assert_eq!(parsed.repositories[2].path, "/c");
+    }
+
+    #[test]
+    fn color_to_name_and_back_completeness() {
+        // 验证所有颜色都有名称，且名称都能反解
+        for c in 1..=6u8 {
+            let name = color_to_name(c).expect("颜色应有名称");
+            assert_eq!(color_from_name(name), c, "颜色 {c} 与名称 {name} 应互逆");
+        }
+        // 颜色 0 没有名称
+        assert_eq!(color_to_name(0), None);
+    }
+
+    #[test]
+    fn is_zero_u32_boundary() {
+        // 0 是 zero，其他非零值不是
+        assert!(is_zero_u32(&0));
+        for v in [1u32, 100, u32::MAX] {
+            assert!(!is_zero_u32(&v), "{v} 不应是 zero");
+        }
+    }
 }

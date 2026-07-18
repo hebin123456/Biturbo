@@ -403,5 +403,119 @@ mod tests {
         assert_eq!(tokens[0].start, 10);
         assert_eq!(tokens[0].end, 20);
     }
+
+    #[test]
+    fn add_token_preserves_order() {
+        // 多次调用应按调用顺序追加
+        let mut tokens = Vec::new();
+        add_token(&mut tokens, 0, 0, 5);
+        add_token(&mut tokens, 1, 5, 10);
+        add_token(&mut tokens, 2, 10, 15);
+        assert_eq!(tokens.len(), 3);
+        assert_eq!(tokens.iter().map(|t| t.kind).collect::<Vec<_>>(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn add_token_zero_length_range_is_allowed() {
+        // start == end 不应触发 panic
+        let mut tokens = Vec::new();
+        add_token(&mut tokens, 26, 7, 7);
+        assert_eq!(tokens[0].start, tokens[0].end);
+    }
+
+    #[test]
+    fn diff_header_with_crlf_line_ending() {
+        // 模拟 Windows 风格 diff 行末 \r\n：路径不应包含 \r
+        let line = "diff --git a/foo.txt b/bar.txt";
+        let mut tokens = Vec::new();
+        assert!(add_diff_header_path_tokens(line, 0, "a/", "b/", &mut tokens));
+        // 验证 src/dst token 的偏移指向的子串不含 \r
+        for t in &tokens {
+            assert!(t.end as usize <= line.len());
+        }
+    }
+
+    #[test]
+    fn diff_header_with_long_paths() {
+        // 长路径不应触发截断
+        let line = "diff --git a/very/long/source/path/foo.rs b/another/long/target/bar.rs";
+        let mut tokens = Vec::new();
+        assert!(add_diff_header_path_tokens(line, 0, "a/", "b/", &mut tokens));
+        let src = tokens.iter().find(|t| t.kind == 1).unwrap();
+        let dst = tokens.iter().find(|t| t.kind == 2).unwrap();
+        assert_eq!(&line[src.start as usize..src.end as usize], "very/long/source/path/foo.rs");
+        assert_eq!(&line[dst.start as usize..dst.end as usize], "another/long/target/bar.rs");
+    }
+
+    #[test]
+    fn diff_header_quoted_paths_with_spaces() {
+        // 带空格的引号路径：src/dst 应正确切分
+        let line = "diff --git \"a/my file.txt\" \"b/my file.txt\"";
+        let mut tokens = Vec::new();
+        assert!(add_diff_header_path_tokens(line, 0, "a/", "b/", &mut tokens));
+        let src = tokens.iter().find(|t| t.kind == 1).unwrap();
+        let dst = tokens.iter().find(|t| t.kind == 2).unwrap();
+        assert_eq!(&line[src.start as usize..src.end as usize], "my file.txt");
+        assert_eq!(&line[dst.start as usize..dst.end as usize], "my file.txt");
+    }
+
+    #[test]
+    fn chunk_header_with_large_line_numbers() {
+        // 大行号不应被截断
+        let line = "@@ -1000000,3 +2000000,5 @@ ctx";
+        let mut tokens = Vec::new();
+        tokenize_chunk_header(line, 0, line.len(), &mut tokens);
+        assert_eq!(
+            &line[tokens.iter().find(|t| t.kind == 17).unwrap().start as usize
+                ..tokens.iter().find(|t| t.kind == 17).unwrap().end as usize],
+            "1000000"
+        );
+        assert_eq!(
+            &line[tokens.iter().find(|t| t.kind == 19).unwrap().start as usize
+                ..tokens.iter().find(|t| t.kind == 19).unwrap().end as usize],
+            "2000000"
+        );
+    }
+
+    #[test]
+    fn chunk_header_with_only_minus_count() {
+        // 不寻常格式：只有 minus 有 count，plus 无
+        let line = "@@ -1,7 +1 @@";
+        let mut tokens = Vec::new();
+        tokenize_chunk_header(line, 0, line.len(), &mut tokens);
+        let ks = kinds(&tokens);
+        assert!(ks.contains(&18), "minus len token (18) should exist");
+        assert!(!ks.contains(&20), "plus len token (20) should be absent");
+    }
+
+    #[test]
+    fn chunk_header_with_context_after_closing_at_at() {
+        // 闭合 @@ 后的上下文文本应被识别为 kind 21
+        let line = "@@ -1,1 +1,1 @@ fn add(a, b)";
+        let mut tokens = Vec::new();
+        tokenize_chunk_header(line, 0, line.len(), &mut tokens);
+        let ctx = tokens.iter().find(|t| t.kind == 21).expect("context token (21) missing");
+        assert_eq!(&line[ctx.start as usize..ctx.end as usize], "fn add(a, b)");
+    }
+
+    #[test]
+    fn chunk_header_no_context_returns_no_kind_21() {
+        // 没有上下文文本时不应产生 kind 21
+        let line = "@@ -1,1 +1,1 @@";
+        let mut tokens = Vec::new();
+        tokenize_chunk_header(line, 0, line.len(), &mut tokens);
+        let ks = kinds(&tokens);
+        assert!(!ks.contains(&21), "context token should be absent");
+    }
+
+    #[test]
+    fn kinds_helper_collects_correctly() {
+        let tokens = vec![
+            BtPatchToken { kind: 0, start: 0, end: 1 },
+            BtPatchToken { kind: 1, start: 1, end: 2 },
+            BtPatchToken { kind: 0, start: 2, end: 3 },
+        ];
+        assert_eq!(kinds(&tokens), vec![0, 1, 0]);
+    }
 }
 

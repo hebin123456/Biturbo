@@ -280,4 +280,116 @@ mod tests {
         assert_eq!(syntax_style("public", true, false, false), Some(5));
         assert_eq!(syntax_style("public", false, true, false), Some(2));
     }
+
+    #[test]
+    fn syntax_style_csharp_full_keyword_set() {
+        // 完整覆盖 C# 关键字集合
+        for w in ["using", "namespace", "return", "if", "else", "for", "while", "new"] {
+            assert_eq!(syntax_style(w, true, false, false), Some(2), "C# 关键字 {w} 应为 style 2");
+        }
+    }
+
+    #[test]
+    fn syntax_style_csharp_full_type_set() {
+        // 完整覆盖 C# 类型集合
+        for w in ["class", "struct", "enum", "interface", "int", "long", "string", "bool",
+                  "double", "float", "byte", "char", "void", "object", "var"] {
+            assert_eq!(syntax_style(w, true, false, false), Some(3), "C# 类型 {w} 应为 style 3");
+        }
+    }
+
+    #[test]
+    fn syntax_style_rust_full_keyword_set() {
+        // 完整覆盖 Rust 关键字集合
+        for w in ["pub", "fn", "let", "mut", "use", "mod", "impl", "struct", "enum",
+                  "return", "if", "else"] {
+            assert_eq!(syntax_style(w, false, false, true), Some(2), "Rust 关键字 {w} 应为 style 2");
+        }
+    }
+
+    #[test]
+    fn syntax_style_rust_full_type_set() {
+        // 完整覆盖 Rust 整数类型集合
+        for w in ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64", "usize", "isize"] {
+            assert_eq!(syntax_style(w, false, false, true), Some(3), "Rust 类型 {w} 应为 style 3");
+        }
+    }
+
+    #[test]
+    fn syntax_style_rust_full_literal_set() {
+        // 完整覆盖 Rust 字面量
+        for w in ["true", "false", "None", "Some"] {
+            assert_eq!(syntax_style(w, false, false, true), Some(7), "Rust 字面量 {w} 应为 style 7");
+        }
+    }
+
+    #[test]
+    fn syntax_style_js_ts_full_keyword_set() {
+        // 完整覆盖 JS/TS 关键字集合
+        for w in ["import", "from", "const", "let", "var", "class", "interface",
+                  "public", "private", "return", "if", "else", "new"] {
+            assert_eq!(syntax_style(w, false, true, false), Some(2), "JS/TS 关键字 {w} 应为 style 2");
+        }
+    }
+
+    #[test]
+    fn syntax_style_js_ts_literal_set() {
+        // JS/TS 字面量
+        for w in ["null", "true", "false"] {
+            assert_eq!(syntax_style(w, false, true, false), Some(7), "JS/TS 字面量 {w} 应为 style 7");
+        }
+        // undefined 不在已知集合中
+        assert_eq!(syntax_style("undefined", false, true, false), None);
+    }
+
+    #[test]
+    fn syntax_style_case_sensitive() {
+        // 大小写敏感：Public != public（C# 中应返回 None）
+        assert_eq!(syntax_style("Public", true, false, false), None);
+        assert_eq!(syntax_style("PUBLIC", true, false, false), None);
+        // Rust 的 None/Some 是大写开头
+        assert_eq!(syntax_style("none", false, false, true), None);
+        assert_eq!(syntax_style("some", false, false, true), None);
+    }
+
+    #[test]
+    fn syntax_style_priority_csharp_over_rust() {
+        // 当多个语言标志同时为 true 时，C# 分支优先返回
+        // 验证 "class" 在 c_sharp=true 时返回 3（type）
+        assert_eq!(syntax_style("class", true, false, true), Some(3));
+        // "fn" 是 Rust 关键字，但 C# 不识别；当 c_sharp=true 时应返回 None
+        assert_eq!(syntax_style("fn", true, false, true), None);
+    }
+
+    #[test]
+    fn syntax_style_priority_rust_over_js_ts() {
+        // Rust 标志优先于 JS-TS：当 is_rust=true 且 is_js_ts=true 时，应走 Rust 分支
+        // "let" 在 Rust 中是关键字 (2)，在 JS-TS 中也是关键字 (2)，结果相同
+        assert_eq!(syntax_style("let", false, true, true), Some(2));
+        // "fn" 在 Rust 中是关键字 (2)，在 JS-TS 中不识别
+        assert_eq!(syntax_style("fn", false, true, true), Some(2));
+    }
+
+    #[test]
+    fn syntax_style_only_whitespace() {
+        // 仅空白字符应返回 None（is_empty 检查）
+        assert_eq!(syntax_style("    ", true, false, false), None);
+        assert_eq!(syntax_style("\t\n", false, false, true), None);
+    }
+
+    #[test]
+    fn syntax_style_csharp_case_sensitive_lowercase_only() {
+        // 验证所有 C# 关键字都是小写
+        assert_eq!(syntax_style("using", true, false, false), Some(2));
+        assert_eq!(syntax_style("Using", true, false, false), None);
+        assert_eq!(syntax_style("USING", true, false, false), None);
+    }
+
+    #[test]
+    fn syntax_style_unknown_identifiers() {
+        // 自定义标识符不应被识别
+        assert_eq!(syntax_style("myFunction", true, false, false), None);
+        assert_eq!(syntax_style("MyClass", false, false, true), None);
+        assert_eq!(syntax_style("someVar", false, true, false), None);
+    }
 }
