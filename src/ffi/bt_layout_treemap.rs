@@ -501,23 +501,25 @@ mod tests {
 
     #[test]
     fn two_nodes_split_along_longer_dimension() {
-        // 两个节点沿较长边按比例分割
+        // 两个节点沿较长边按比例分割。squarify 会先按 size 降序排序，
+        // 因此 items[0] 对应 size=70（最大），items[1] 对应 size=30。
         let items = call(&[30, 70], BtRect { x: 0.0, y: 0.0, w: 100.0, h: 50.0 });
         assert_eq!(items.len(), 2);
-        // 总和 100，比例为 30/100 和 70/100
-        // 第一节点占 30% 宽度
-        assert!((items[0].rect.w - 30.0).abs() < 1e-6, "w0 应为 30: {:?}", items[0].rect);
-        // 第二节点占剩余 70% 宽度
-        assert!((items[1].rect.w - 70.0).abs() < 1e-6, "w1 应为 70: {:?}", items[1].rect);
+        // 总和 100，比例为 70/100 和 30/100
+        // 第一节点（size=70）占 70% 宽度
+        assert!((items[0].rect.w - 70.0).abs() < 1e-6, "w0 应为 70: {:?}", items[0].rect);
+        // 第二节点（size=30）占 30% 宽度
+        assert!((items[1].rect.w - 30.0).abs() < 1e-6, "w1 应为 30: {:?}", items[1].rect);
     }
 
     #[test]
     fn two_nodes_tall_rect_split_along_height() {
-        // 高度大于宽度时，两节点沿高度方向分割
+        // 高度大于宽度时，两节点沿高度方向分割。
+        // squarify 按 size 降序：items[0] 对应 size=70，items[1] 对应 size=30。
         let items = call(&[30, 70], BtRect { x: 0.0, y: 0.0, w: 50.0, h: 100.0 });
         assert_eq!(items.len(), 2);
-        assert!((items[0].rect.h - 30.0).abs() < 1e-6);
-        assert!((items[1].rect.h - 70.0).abs() < 1e-6);
+        assert!((items[0].rect.h - 70.0).abs() < 1e-6, "h0 应为 70: {:?}", items[0].rect);
+        assert!((items[1].rect.h - 30.0).abs() < 1e-6, "h1 应为 30: {:?}", items[1].rect);
     }
 
     #[test]

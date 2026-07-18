@@ -267,8 +267,15 @@ mod tests {
 
     #[test]
     fn trim_ascii_whitespace_all_ascii_whitespace_kinds() {
-        // 空格、\t、\n、\r、\x0c (form feed)、\x0b (vertical tab) 均为 ASCII 空白
-        assert_eq!(trim_ascii_whitespace(b"\x0b\x0c\t\n\r abc \r\n\t\x0c\x0b"), b"abc");
+        // Rust 的 u8::is_ascii_whitespace 识别：空格、\t、\n、\r、\x0c (form feed)。
+        // 注意：\x0b (vertical tab) 不在 ASCII whitespace 之列，会被保留。
+        assert_eq!(trim_ascii_whitespace(b"\x0c\t\n\r abc \r\n\t\x0c"), b"abc");
+    }
+
+    #[test]
+    fn trim_ascii_whitespace_vertical_tab_is_not_ascii_ws() {
+        // \x0b (vertical tab) 不是 Rust 的 ASCII whitespace，不会被裁掉
+        assert_eq!(trim_ascii_whitespace(b"\x0babc\x0b"), b"\x0babc\x0b");
     }
 
     #[test]
