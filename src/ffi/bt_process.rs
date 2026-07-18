@@ -1,3 +1,14 @@
+//! # 子进程派生与取消
+//!
+//! 提供 [`bt_spawn_with_output`]（一次性收集 stdout/stderr）与
+//! [`bt_spawn_with_callback`]（按行回调 stdout/stderr）两种子进程派生方式，
+//! 配套 [`bt_new_process_cancellation_token`] /
+//! [`bt_kill_process_cancellation_token`] /
+//! [`bt_release_process_cancellation_token`] 管理取消令牌。
+//!
+//! # 错误码
+//! 与其他模块一致：`0` 成功、`1` 失败。
+
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::types::BtBuf;
 use crate::ffi::winheap::{heap_alloc, heap_free};
@@ -33,7 +44,14 @@ unsafe fn heap_alloc_legacy_output(bytes: &[u8]) -> (*mut u8, usize) {
     (ptr, cap)
 }
 
-// Callback signature for bt_spawn_with_callback
+/// 子进程输出回调函数签名。
+///
+/// 由 [`bt_spawn_with_callback`] 在每读到一行 stdout/stderr 时调用。
+///
+/// # 参数
+/// - `cb_target_ptr`：调用方传入的不透明上下文指针，原样回传。
+/// - `kind`：`0` 表示 stdout，`1` 表示 stderr。
+/// - `data_ptr` / `data_len`：本行字节流（含行尾 `\n`，最后一次可能不含）。
 pub type ReadLineCallback = unsafe extern "C" fn(
     cb_target_ptr: *mut c_void,
     kind: u8,
@@ -41,11 +59,24 @@ pub type ReadLineCallback = unsafe extern "C" fn(
     data_len: i64,
 );
 
+/// 子进程取消令牌的 C ABI 包装。
+///
+/// `inner` 指向堆分配的 [`ProcessCancellationToken`]，必须由
+/// [`bt_release_process_cancellation_token`] 释放。
 #[repr(C)]
 pub struct BtProcessCancellationToken {
     pub inner: *mut c_void,
 }
 
+/// [`bt_spawn_with_output`] 的返回结果。
+///
+/// # 字段
+/// - `status`：子进程退出码；spawn/wait 失败时为 `-1`。
+/// - `_pad`：对齐填充。
+/// - `stdout` / `stderr`：通过进程堆分配的字节缓冲区。
+///
+/// # 内存所有权
+/// `stdout` 与 `stderr` 必须由 [`bt_release_spawn_with_output_result`] 释放。
 #[repr(C)]
 pub struct BtSpawnWithOutputResult {
     pub status: i32,
@@ -54,6 +85,10 @@ pub struct BtSpawnWithOutputResult {
     pub stderr: BtBuf,
 }
 
+/// [`bt_spawn_with_callback`] 的返回结果。
+///
+/// # 字段
+/// - `status`：子进程退出码；spawn 失败或被取消时为 `-1`。
 #[repr(C)]
 pub struct BtSpawnWithCallbackResult {
     pub status: i32,
@@ -68,6 +103,13 @@ pub struct ProcessCancellationToken {
     state: Mutex<ProcessCancelState>,
 }
 
+/// 创建一个子进程取消令牌。
+///
+/// 用于配合 [`bt_spawn_with_callback`] 实现对子进程的取消控制。
+/// 返回的句柄必须用 [`bt_release_process_cancellation_token`] 释放。
+///
+/// # 内存所有权
+/// `inner` 指向堆分配的内部状态，跨 FFI 边界由调用方持有所有权。
 #[no_mangle]
 pub unsafe extern "C" fn bt_new_process_cancellation_token() -> BtProcessCancellationToken {
     let token = Box::new(ProcessCancellationToken {
@@ -86,6 +128,17 @@ pub unsafe extern "C" fn bt_new_process_cancellation_token() -> BtProcessCancell
     }
 }
 
+/// 取消由 [`bt_new_process_cancellation_token`] 创建的令牌。
+///
+/// 设置令牌的“已取消”标志。若已有子进程与该令牌关联，
+/// 会立即向子进程发送 kill。
+///
+/// # 参数
+/// - `token`：令牌指针；为 `null` 或非活动句柄返回 `1`。
+///
+/// # 返回值
+/// - `0`：成功。
+/// - `1`：令牌无效。
 #[no_mangle]
 pub unsafe extern "C" fn bt_kill_process_cancellation_token(token: *mut BtProcessCancellationToken) -> c_int {
     if token.is_null() {
@@ -110,6 +163,13 @@ pub unsafe extern "C" fn bt_kill_process_cancellation_token(token: *mut BtProces
     0
 }
 
+/// 释放由 [`bt_new_process_cancellation_token`] 创建的令牌。
+///
+/// 会从活动令牌集合中移除并回收 `Box`。`*token.inner` 会被置 `null`，
+/// 重复释放安全。传入 `null` 安全。
+///
+/// # 内存所有权
+/// 仅可释放由 [`bt_new_process_cancellation_token`] 返回的令牌。
 #[no_mangle]
 pub unsafe extern "C" fn bt_release_process_cancellation_token(token: *mut BtProcessCancellationToken) {
     if token.is_null() {
@@ -124,6 +184,23 @@ pub unsafe extern "C" fn bt_release_process_cancellation_token(token: *mut BtPro
     }
 }
 
+/// 派生子进程并一次性收集 stdout / stderr。
+///
+/// # 参数
+/// - `path`：可执行文件路径（NUL 终止 UTF-8）。
+/// - `current_dir`：可选工作目录；为 `null` 表示继承。
+/// - `args_ptr` / `args_len`：参数字符串数组（每个为 NUL 终止 UTF-8）。
+/// - `env_ptr` / `env_len`：环境变量扁平数组 `[key, val, key, val, ...]`。
+/// - `stdin_ptr` / `stdin_len`：可选 stdin 字节流；为 `null` 时把 stdin 接到 `Stdio::null()`。
+/// - `out_result`：输出 [`BtSpawnWithOutputResult`]。
+///
+/// # 返回值
+/// - `0`：成功（无论退出码是多少）。
+/// - `1`：参数非法、spawn 失败或内存不足。
+///
+/// # 内存所有权
+/// 输出的 `stdout` / `stderr` 通过进程堆分配，必须用
+/// [`bt_release_spawn_with_output_result`] 释放。
 #[no_mangle]
 pub unsafe extern "C" fn bt_spawn_with_output(
     path: *const c_char,
@@ -251,6 +328,14 @@ pub unsafe extern "C" fn bt_spawn_with_output(
     0
 }
 
+/// 释放 [`bt_spawn_with_output`] 返回的 [`BtSpawnWithOutputResult`] 中的
+/// `stdout` 与 `stderr` 缓冲区。
+///
+/// 仅当对应 `BtBuf.cap != 0` 时才会释放，并把 `cap` / `len` 清零，
+/// 重复释放安全。传入 `null` 安全。
+///
+/// # 内存所有权
+/// 仅可释放由 [`bt_spawn_with_output`] 填充的字段。
 #[no_mangle]
 pub unsafe extern "C" fn bt_release_spawn_with_output_result(p: *mut BtSpawnWithOutputResult) {
     if p.is_null() {
@@ -276,6 +361,27 @@ pub unsafe extern "C" fn bt_release_spawn_with_output_result(p: *mut BtSpawnWith
     }
 }
 
+/// 派生子进程并通过回调按行读取 stdout / stderr。
+///
+/// 与 [`bt_spawn_with_output`] 不同：本函数不会把整个输出缓存到内存，
+/// 而是每读到一行就调用 `read_line_cb`。可通过 `process_cancellation_token_ptr`
+/// 关联取消令牌，外部调用 [`bt_kill_process_cancellation_token`] 即可终止子进程。
+///
+/// # 参数
+/// - `path` / `current_dir` / `args_ptr` / `args_len` / `env_ptr` / `env_len` /
+///   `stdin_ptr` / `stdin_len`：同 [`bt_spawn_with_output`]。
+/// - `cb_target_ptr`：原样回传给回调的不透明上下文指针。
+/// - `read_line_cb`：每行回调，签名见 [`ReadLineCallback`]。
+/// - `process_cancellation_token_ptr`：可选取消令牌；为 `null` 表示不参与取消。
+/// - `out_result`：输出 [`BtSpawnWithCallbackResult`]，仅含退出码。
+///
+/// # 返回值
+/// - `0`：成功（无论退出码是多少，包括被取消的情况）。
+/// - `1`：参数非法或 spawn 失败。
+///
+/// # 内存所有权
+/// 本函数不返回任何堆分配缓冲区；调用方在回调中接收的 `data_ptr` 仅在回调期间有效，
+/// 回调返回后即被复用，调用方需要自行复制。
 #[no_mangle]
 pub unsafe extern "C" fn bt_spawn_with_callback(
     path: *const c_char,

@@ -1,8 +1,21 @@
+//! # 轻量级语法高亮
+//!
+//! 提供 [`bt_highlight_syntax`]：根据文件后缀（C# / Rust / JS-TS）对 diff
+//! 文本中给定区间做轻量词法识别，输出每段区间的语法样式编号，供 UI 着色。
+//!
+//! 样式编号约定：`0` = 注释、`1` = 字符串、`2` = 关键字、`3` = 类型、
+//! `5` = 修饰符（仅 C#）、`7` = 字面量、`8` = 数字。
+
 use crate::ffi::types::BtRange;
 use crate::ffi::winheap::heap_alloc;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 
+/// 单个高亮区间。
+///
+/// # 字段
+/// - `range_utf16`：原始 UTF-16 区间（与 C# 侧的字符串索引一致）。
+/// - `style`：语法样式编号（见模块说明）。
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct BtHighlighedRange {
@@ -10,6 +23,11 @@ pub struct BtHighlighedRange {
     pub style: u8,
 }
 
+/// 高亮结果批量数组。
+///
+/// # 内存所有权
+/// `items` 通过进程堆分配，必须用
+/// [`crate::ffi::bt_release_vec::bt_release_highlight_syntax`] 释放。
 #[repr(C)]
 pub struct BtHighlightedDiff {
     pub items: *mut BtHighlighedRange,
@@ -17,6 +35,21 @@ pub struct BtHighlightedDiff {
     pub items_cap: i64,
 }
 
+/// 对 diff 文本中给定区间做语法高亮识别。
+///
+/// # 参数
+/// - `file_path`：用于推断语言（`.cs` / `.rs` / `.js|.ts|.tsx`）；为 `null` 跳过语言规则。
+/// - `diff`：完整 diff 文本（NUL 终止 UTF-8），区间偏移以该文本的 UTF-16 编码为准。
+/// - `ranges_ptr` / `ranges_len`：[`BtRange`] 数组，每段是待识别的 UTF-16 区间。
+/// - `out_result`：输出 [`BtHighlightedDiff`]，调用前可未初始化。
+///
+/// # 返回值
+/// - `0`：成功（含无可识别 token 时返回空结果）。
+/// - `1`：参数非法（`out_result` / `diff` 为 `null`，或 `diff` 非 UTF-8）。
+///
+/// # 内存所有权
+/// 输出的 `items` 数组通过进程堆分配，必须用
+/// [`crate::ffi::bt_release_vec::bt_release_highlight_syntax`] 释放。
 #[no_mangle]
 pub unsafe extern "C" fn bt_highlight_syntax(
     file_path: *const c_char,

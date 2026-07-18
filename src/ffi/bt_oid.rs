@@ -1,11 +1,29 @@
+//! # SHA-1 OID 字符串解析
+//!
+//! 提供 [`bt_oid_from_str`]：把 40 字符的十六进制 SHA-1 字符串
+//! 解析为 20 字节原始 OID，并按原版 `biturbo.dll` 的字节序约定写出。
+
 use crate::ffi::error::set_last_error_str;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 
-/// Parse a 40-hex SHA-1 string into a 20-byte OID buffer.
+/// 将 40 字符的十六进制 SHA-1 字符串解析为 20 字节 OID。
 ///
-/// The output matches the observed behavior in the original DLL:
-/// each 32-bit word is byte-swapped (4-byte chunk reverse).
+/// 输出布局与原版 DLL 保持一致：每 4 字节为一组，组内字节顺序反转
+/// （即以小端字节序存储 4 字节 chunk，与 `BtOid` 的 `s0..s4` 大端 u32
+/// 表示在内存中相同）。
+///
+/// # 参数
+/// - `sha_string`: 指向 NUL 终止的 40 字符十六进制字符串的指针。
+/// - `out_oid20`: 指向至少 20 字节的输出缓冲区，用于接收解析结果。
+///
+/// # 返回值
+/// - `0`（`BT_OK`）：解析成功。
+/// - `1`（`BT_ERR`）：参数为空或字符串长度/字符非法。失败时可通过
+///   `bt_get_last_error_message` 取回详细描述。
+///
+/// # 内存所有权
+/// `out_oid20` 由调用方拥有并负责释放，本函数仅写入 20 字节。
 #[no_mangle]
 pub unsafe extern "C" fn bt_oid_from_str(sha_string: *const c_char, out_oid20: *mut u8) -> c_int {
     if sha_string.is_null() || out_oid20.is_null() {

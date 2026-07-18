@@ -1,3 +1,9 @@
+//! # Revision 头信息批量读取
+//!
+//! 提供 [`bt_get_revision_headers`] / [`bt_release_revision_headers`]：
+//! 给定一组提交 OID，返回每个提交的作者（去重后单独存放）、时间戳、主题
+//! 以及“是否有 body”标志，用于在 UI 中渲染提交列表行。
+
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::types::BtOid;
 use crate::ffi::winheap::{heap_alloc, heap_alloc_c_string, heap_free};
@@ -7,6 +13,16 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::path::Path;
 
+/// 单个 revision 的头信息。
+///
+/// # 字段
+/// - `author_index`：在 [`BtRevisionHeaders::identities`] 中的下标。
+/// - `author_time`：作者时间戳（Unix 秒）。
+/// - `subject`：提交主题（NUL 终止 UTF-8）。
+/// - `has_body`：非零表示该提交有非空 body。
+///
+/// # 内存所有权
+/// `subject` 由 [`bt_release_revision_headers`] 与所在数组一并释放。
 #[repr(C)]
 pub struct BtRevisionHeader {
     pub author_index: i64,
@@ -15,6 +31,16 @@ pub struct BtRevisionHeader {
     pub has_body: u8,
 }
 
+/// revision 头信息批量结果。
+///
+/// # 字段
+/// - `revisions` / `revisions_len` / `revisions_cap`：[`BtRevisionHeader`] 数组。
+/// - `identities` / `identities_len` / `identities_cap`：去重后的
+///   [`BtIdentity`] 数组，被 `author_index` 引用。
+///
+/// # 内存所有权
+/// `revisions`、`identities` 数组及其中字符串均通过进程堆分配，
+/// 必须用 [`bt_release_revision_headers`] 一次性释放。
 #[repr(C)]
 pub struct BtRevisionHeaders {
     pub revisions: *mut BtRevisionHeader,
@@ -25,6 +51,21 @@ pub struct BtRevisionHeaders {
     pub identities_cap: i64,
 }
 
+/// 批量读取给定 OID 列表的 revision 头信息。
+///
+/// # 参数
+/// - `_working_dir_path`：保留参数，当前未使用。
+/// - `git_dir_path`：仓库 `.git` 目录（NUL 终止 UTF-8）。
+/// - `oids_ptr` / `oids_len`：待查询的 OID 数组；为 `null` 或 `len <= 0` 返回错误。
+/// - `out_result`：输出 [`BtRevisionHeaders`]，调用前可未初始化。
+///
+/// # 返回值
+/// - `0`：成功（含空结果情况）。
+/// - `1`：参数非法或仓库/内存错误。
+///
+/// # 内存所有权
+/// 输出的 `revisions` 与 `identities` 数组及其中字符串均通过进程堆分配，
+/// 必须用 [`bt_release_revision_headers`] 释放。
 #[no_mangle]
 pub unsafe extern "C" fn bt_get_revision_headers(
     _working_dir_path: *const c_char,
@@ -164,6 +205,14 @@ pub unsafe extern "C" fn bt_get_revision_headers(
     0
 }
 
+/// 释放 [`bt_get_revision_headers`] 返回的 [`BtRevisionHeaders`]。
+///
+/// 会先释放每个 revision 的 `subject`、每个 identity 的 `name`/`email`，
+/// 再释放 `revisions` 与 `identities` 数组本身。调用后结构体字段会被清零，
+/// 重复释放安全。传入 `null` 安全。
+///
+/// # 内存所有权
+/// 仅可释放由 [`bt_get_revision_headers`] 填充的结构。
 #[no_mangle]
 pub unsafe extern "C" fn bt_release_revision_headers(p: *mut BtRevisionHeaders) {
     if p.is_null() {

@@ -1,7 +1,22 @@
+//! # Unified Diff / Patch 词法解析
+//!
+//! 提供 [`bt_parse_patch`]：把 unified diff 文本切分为若干带类型标签的
+//! 字节区间（[`BtPatchToken`]），供上层 UI 着色或结构化渲染。
+//!
+//! 输出 token 的 `start` / `end` 是相对原始 `patch_utf8` 字节的偏移；
+//! `kind` 是固定枚举值，例如 `0` = `diff --git`、`1`/`2` = 源/目标路径、
+//! `3`/`4`/`5` = index 的左/右/模式、`16` = hunk 头、`17..=20` = hunk 计数、
+//! `22`/`23`/`24` = 普通行 / `+` 行 / `-` 行等。
+
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::winheap::heap_alloc;
 use std::os::raw::c_int;
 
+/// 单个 patch token：一段带类型标签的字节区间。
+///
+/// # 字段
+/// - `kind`：token 类型码（见模块说明）。
+/// - `start` / `end`：相对原始 patch 字节流的 `[start, end)` 区间。
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BtPatchToken {
@@ -10,6 +25,11 @@ pub struct BtPatchToken {
     pub end: u32,
 }
 
+/// patch 解析结果。
+///
+/// # 内存所有权
+/// `tokens` 通过进程堆分配，必须用
+/// [`crate::ffi::bt_release_vec::bt_release_parse_patch`] 释放。
 #[repr(C)]
 pub struct BtParsePatchResult {
     pub tokens: *mut BtPatchToken,
@@ -17,6 +37,22 @@ pub struct BtParsePatchResult {
     pub tokens_cap: i64,
 }
 
+/// 把 unified diff 文本切分为带类型的字节区间列表。
+///
+/// # 参数
+/// - `patch_utf8` / `patch_utf8_len`：UTF-8 diff 文本字节流。
+/// - `src_prefix_utf8` / `src_prefix_utf8_len`：可选的源前缀（如 `a/`），
+///   用于在 `diff --git` 行中精确定位源路径；为 `null`/0 视为默认 `a/`。
+/// - `dst_prefix_utf8` / `dst_prefix_utf8_len`：可选的目标前缀（如 `b/`）。
+/// - `out_result`：输出 [`BtParsePatchResult`]，调用前可未初始化。
+///
+/// # 返回值
+/// - `0`：成功（即使内部 `heap_alloc` 失败也返回 0，但 `out_result` 为空）。
+/// - `1`：参数非法。
+///
+/// # 内存所有权
+/// 输出的 `tokens` 数组通过进程堆分配，必须用
+/// [`crate::ffi::bt_release_vec::bt_release_parse_patch`] 释放。
 #[no_mangle]
 pub unsafe extern "C" fn bt_parse_patch(
     patch_utf8: *const u8,

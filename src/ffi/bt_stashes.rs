@@ -1,3 +1,9 @@
+//! # Git Stash 列表读取
+//!
+//! 提供 [`bt_get_repository_stashes`] / [`bt_release_repository_stashes`]：
+//! 通过 `refs/stash` reflog 枚举仓库的 stash 列表，返回每条 stash 的 OID、
+//! 首父提交、作者信息（去重后单独存放）与主题。
+
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::types::BtOid;
 use crate::ffi::winheap::{heap_alloc, heap_alloc_c_string, heap_free};
@@ -6,12 +12,28 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::path::Path;
 
+/// 去重后的作者身份（name + email）。
+///
+/// # 字段
+/// - `name` / `email`：NUL 终止 UTF-8 字符串（进程堆分配）。
+///
+/// # 内存所有权
+/// 由 [`bt_release_repository_stashes`] 与所在 [`BtRepositoryStashes`] 一并释放。
 #[repr(C)]
 pub struct BtIdentity {
     pub name: *mut c_char,
     pub email: *mut c_char,
 }
 
+/// 单条 stash 信息。
+///
+/// # 字段
+/// - `reflog_id`：在 `refs/stash` reflog 中的下标（0 = 最新）。
+/// - `oid`：stash 提交 OID。
+/// - `first_parent`：stash 提交的首父 OID（通常是基础提交）。
+/// - `author_index`：在 [`BtRepositoryStashes::identities`] 中的下标。
+/// - `author_time`：作者时间戳（Unix 秒）。
+/// - `subject`：stash 提交主题（NUL 终止 UTF-8）。
 #[repr(C)]
 pub struct BtStash {
     pub reflog_id: i32,
@@ -22,6 +44,16 @@ pub struct BtStash {
     pub subject: *mut c_char,
 }
 
+/// stash 列表批量结果。
+///
+/// # 字段
+/// - `stashes` / `stashes_len` / `stashes_cap`：[`BtStash`] 数组。
+/// - `identities` / `identities_len` / `identities_cap`：去重后的 [`BtIdentity`] 数组，
+///   被 `stashes` 中的 `author_index` 引用。
+///
+/// # 内存所有权
+/// `stashes`、`identities` 数组及其中所有字符串均通过进程堆分配，
+/// 必须用 [`bt_release_repository_stashes`] 一次性释放。
 #[repr(C)]
 pub struct BtRepositoryStashes {
     pub stashes: *mut BtStash,
@@ -32,6 +64,23 @@ pub struct BtRepositoryStashes {
     pub identities_cap: i64,
 }
 
+/// 枚举仓库的 stash 列表。
+///
+/// 若仓库没有 `refs/stash` reflog，则视为“无 stash”直接返回 `0`
+/// 而不是错误。空结果时不会进行任何内存分配。
+///
+/// # 参数
+/// - `_working_dir_path`：保留参数，当前未使用。
+/// - `git_dir_path`：仓库 `.git` 目录（NUL 终止 UTF-8）。
+/// - `out_result`：输出 [`BtRepositoryStashes`]，调用前可未初始化。
+///
+/// # 返回值
+/// - `0`：成功（含无 stash 情况）。
+/// - `1`：参数非法或仓库/内存错误。
+///
+/// # 内存所有权
+/// 输出的 `stashes` 与 `identities` 数组及其中字符串均通过进程堆分配，
+/// 必须用 [`bt_release_repository_stashes`] 释放。
 #[no_mangle]
 pub unsafe extern "C" fn bt_get_repository_stashes(
     _working_dir_path: *const c_char,
@@ -194,6 +243,13 @@ pub unsafe extern "C" fn bt_get_repository_stashes(
     0
 }
 
+/// 释放 [`bt_get_repository_stashes`] 返回的 [`BtRepositoryStashes`]。
+///
+/// 会先释放每条 stash 的 `subject`、每个 identity 的 `name`/`email`，
+/// 再释放 `stashes` 与 `identities` 数组本身。传入 `null` 安全。
+///
+/// # 内存所有权
+/// 仅可释放由 [`bt_get_repository_stashes`] 填充的结构。
 #[no_mangle]
 pub unsafe extern "C" fn bt_release_repository_stashes(p: *mut BtRepositoryStashes) {
     if p.is_null() {
@@ -238,6 +294,10 @@ pub unsafe extern "C" fn bt_release_repository_stashes(p: *mut BtRepositoryStash
     }
 }
 
+/// 把 40 字符十六进制 SHA-1 字符串解析为 [`BtOid`]。
+///
+/// 输入长度必须为 40，仅接受 `[0-9a-fA-F]` 字符；非法输入返回 `None`。
+/// 输出字节序由 `BtOid::from_bytes` 决定（按 4 字节大端 u32 解释）。
 #[allow(dead_code)]
 pub fn parse_sha_to_btoid(sha: &str) -> Option<BtOid> {
     let b = sha.as_bytes();

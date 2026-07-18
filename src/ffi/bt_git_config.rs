@@ -1,3 +1,9 @@
+//! # Git 配置文件解析
+//!
+//! 提供 [`bt_get_git_config`] / [`bt_release_git_config`]：
+//! 把 Git 风格 INI 配置文件解析为 section / subsection / kv 三元组列表，
+//! 通过进程堆分配返回，供 C 侧按需读取。
+
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::types::{BtGitConfig, BtGitConfigEntry, BtGitConfigKv};
 use crate::ffi::winheap::{heap_alloc, heap_alloc_c_string};
@@ -5,7 +11,19 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::PathBuf;
 
-/// Parse a Git-style configuration file.
+/// 解析 Git 风格配置文件，返回 section 列表。
+///
+/// # 参数
+/// - `config_path`：配置文件路径（NUL 终止 UTF-8）。
+/// - `out_cfg`：输出 [`BtGitConfig`]，调用前可未初始化。
+///
+/// # 返回值
+/// - `0`：成功（含文件为空时返回零长度结果）。
+/// - `1`：参数非法、文件读取失败、配置非 UTF-8 或内存不足。
+///
+/// # 内存所有权
+/// 输出的 `ptr` 数组、每个 entry 的 `a`/`b`/`kv_ptr` 及其中 `k`/`v` 字符串
+/// 均通过进程堆分配，必须用 [`bt_release_git_config`] 一次性释放。
 #[no_mangle]
 pub unsafe extern "C" fn bt_get_git_config(config_path: *const c_char, out_cfg: *mut BtGitConfig) -> c_int {
     if config_path.is_null() || out_cfg.is_null() {
@@ -167,6 +185,15 @@ fn parse_config_content(content: &[u8]) -> Result<Vec<ParsedEntry>, String> {
     Ok(entries)
 }
 
+/// 释放 [`bt_get_git_config`] 返回的 [`BtGitConfig`]。
+///
+/// 会逐个 section 释放 `a`（section 名）、`b`（subsection 名）、
+/// 每个 `kv_ptr` 数组中的 `k` / `v` 字符串，最后释放数组本身。
+/// 释放前会把首字节置 `0` 作为“毒化”标志，与原版 DLL 行为一致。
+/// 传入 `null` 安全。
+///
+/// # 内存所有权
+/// 仅可释放由 [`bt_get_git_config`] 填充的配置。
 #[no_mangle]
 pub unsafe extern "C" fn bt_release_git_config(cfg: *mut BtGitConfig) {
     if cfg.is_null() {

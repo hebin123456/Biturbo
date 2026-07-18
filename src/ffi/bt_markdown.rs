@@ -1,14 +1,26 @@
+//! # Markdown 转 HTML
+//!
+//! 提供 [`bt_md_to_html`] / [`bt_release_md_to_html`]：
+//! 使用 `markdown` crate 把 UTF-8 Markdown 文本渲染为 HTML 字符串，
+//! 通过进程堆分配返回 NUL 终止的 C 字符串。
+
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::winheap::{heap_alloc, heap_free_u8};
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 
-/// Convert markdown (UTF-8) to HTML.
+/// 把 Markdown 文本渲染为 HTML。
 ///
-/// Signature confirmed by disassembly:
-/// - `rcx`: markdown C string
-/// - `rdx`: out pointer to `char*`
-/// - returns `i32` status (0 on success)
+/// # 参数
+/// - `md_utf8`：NUL 终止的 UTF-8 Markdown 文本；为 `null` 返回错误。
+/// - `out_html`：输出 `*mut c_char`，调用前可未初始化，调用后指向 NUL 终止的 HTML。
+///
+/// # 返回值
+/// - `0`：成功。
+/// - `1`：参数非法、Markdown 非 UTF-8 或内存不足。
+///
+/// # 内存所有权
+/// 输出的 HTML 字符串通过进程堆分配，必须用 [`bt_release_md_to_html`] 释放。
 #[no_mangle]
 pub unsafe extern "C" fn bt_md_to_html(md_utf8: *const c_char, out_html: *mut *mut c_char) -> c_int {
     if out_html.is_null() {
@@ -47,9 +59,14 @@ pub unsafe extern "C" fn bt_md_to_html(md_utf8: *const c_char, out_html: *mut *m
     0
 }
 
-/// Release HTML returned by `bt_md_to_html`.
+/// 释放 [`bt_md_to_html`] 返回的 HTML 字符串。
 ///
-/// Signature matches the original: `char**`.
+/// 通过 `*mut *mut c_char` 入参：会把 `*out_html` 取出并置 `null`，
+/// 释放前会把首字节置 `0` 作为“毒化”标志（与原版 DLL 一致）。
+/// 传入 `null` 安全。
+///
+/// # 内存所有权
+/// 仅可释放由 [`bt_md_to_html`] 返回的字符串。
 #[no_mangle]
 pub unsafe extern "C" fn bt_release_md_to_html(out_html: *mut *mut c_char) {
     if out_html.is_null() {

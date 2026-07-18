@@ -1,3 +1,8 @@
+//! # 提交者时间戳批量查询
+//!
+//! 提供 [`bt_get_committer_times`]：根据 OID 列表从仓库读取对应提交的
+//! committer 时间（Unix 秒）。无法解析的 OID 对应位置写入 0。
+
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::types::BtOid;
 use crate::ffi::winheap::heap_alloc;
@@ -5,6 +10,11 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int, c_void};
 use std::path::Path;
 
+/// 提交者时间戳批量结果。
+///
+/// # 内存所有权
+/// `times` 通过进程堆分配，必须用
+/// [`crate::ffi::bt_release_vec::bt_release_committer_times`] 释放。
 #[repr(C)]
 pub struct BtCommitterTimes {
     pub times: *mut i64,
@@ -12,6 +22,22 @@ pub struct BtCommitterTimes {
     pub times_cap: i64,
 }
 
+/// 批量读取给定 OID 列表对应的 committer 时间戳（Unix 秒）。
+///
+/// 输出长度与输入 `oids_len` 一致；不可解析的提交对应位置写入 `0`。
+///
+/// # 参数
+/// - `git_dir_path`：仓库 `.git` 目录（NUL 终止 UTF-8）。
+/// - `oids_ptr` / `oids_len`：待查询的 OID 数组；为 `null` 或 `len <= 0` 返回错误。
+/// - `_commit_graph_cache_ptr`：保留参数，当前未使用。
+/// - `out_result`：输出 [`BtCommitterTimes`]，调用前可未初始化。
+///
+/// # 返回值
+/// - `0`：成功。
+/// - `1`：参数非法或仓库/内存错误。
+///
+/// # 内存所有权
+/// 输出的 `times` 必须用对应的 `bt_release_committer_times` 释放。
 #[no_mangle]
 pub unsafe extern "C" fn bt_get_committer_times(
     git_dir_path: *const c_char,

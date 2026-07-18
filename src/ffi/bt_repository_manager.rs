@@ -1,3 +1,12 @@
+//! # 仓库管理器（TOML 配置）
+//!
+//! 提供 [`bt_get_repository_manager`] / [`bt_save_repository_manager`] /
+//! [`bt_release_repository_manager`]：读写应用级 TOML 配置文件，
+//! 内容包括源目录、扫描深度、忽略规则以及已注册的仓库列表（含别名、颜色等）。
+//!
+//! 颜色用整数编码：`0` 表示未指定，`1..=6` 依次对应
+//! Red / Orange / Yellow / Green / Blue / Violet，序列化时写成名称字符串。
+
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::winheap::{heap_alloc, heap_alloc_c_string, heap_free};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -5,6 +14,16 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::path::PathBuf;
 
+/// 单个被管理仓库的配置条目。
+///
+/// # 字段
+/// - `path`：仓库路径（NUL 终止 UTF-8）。
+/// - `alias`：可选别名（NUL 终止 UTF-8）；无别名时为 `null`。
+/// - `opened`：UI 中已打开的窗口数（用于恢复会话）。
+/// - `color`：标签颜色编码（0=未指定，1..=6 见模块说明）。
+///
+/// # 内存所有权
+/// `path` 与 `alias` 通过进程堆分配，由 [`bt_release_repository_manager`] 一并释放。
 #[repr(C)]
 pub struct BtRepositoryManagerRepository {
     pub path: *mut c_char,
@@ -13,6 +32,16 @@ pub struct BtRepositoryManagerRepository {
     pub color: u8,
 }
 
+/// 仓库管理器配置根结构。
+///
+/// # 字段
+/// - `source_dirs` / `source_dirs_len` / `source_dirs_cap`：源目录字符串数组。
+/// - `scan_depth`：扫描子目录的最大深度，默认 5。
+/// - `ignore` / `ignore_len` / `ignore_cap`：忽略规则字符串数组。
+/// - `repositories` / `repositories_len` / `repositories_cap`：被管理仓库数组。
+///
+/// # 内存所有权
+/// 所有内部指针均通过进程堆分配，必须用 [`bt_release_repository_manager`] 释放。
 #[repr(C)]
 pub struct BtRepositoryManager {
     pub source_dirs: *mut *mut c_char,
@@ -133,6 +162,19 @@ where
     deserializer.deserialize_any(ColorVisitor)
 }
 
+/// 从 TOML 配置文件加载仓库管理器配置。
+///
+/// # 参数
+/// - `path`：TOML 文件路径（NUL 终止 UTF-8）。
+/// - `out_result`：输出 [`BtRepositoryManager`]，调用前可未初始化。
+///
+/// # 返回值
+/// - `0`：成功（含文件不存在时返回空配置的情况）。
+/// - `1`：参数非法、文件读取失败、TOML 解析失败或内存不足。
+///
+/// # 内存所有权
+/// 输出的所有字符串数组与仓库条目均通过进程堆分配，
+/// 必须用 [`bt_release_repository_manager`] 释放。
 #[no_mangle]
 pub unsafe extern "C" fn bt_get_repository_manager(
     path: *const c_char,
@@ -343,6 +385,27 @@ pub unsafe extern "C" fn bt_get_repository_manager(
     0
 }
 
+/// 把仓库管理器配置序列化为 TOML 并写入文件。
+///
+/// 各数组按索引一一对应：`paths[i]` / `aliases[i]` / `opened[i]` / `colors[i]`
+/// 描述第 `i` 个仓库。长度不足的字段以默认值（空字符串 / 0）补齐。
+///
+/// # 参数
+/// - `path`：目标 TOML 文件路径。
+/// - `source_dirs_ptr` / `source_dirs_len`：源目录字符串数组。
+/// - `scan_depth`：扫描深度。
+/// - `ignore_ptr` / `ignore_len`：忽略规则字符串数组。
+/// - `paths_ptr` / `paths_len`：仓库路径字符串数组。
+/// - `aliases_ptr` / `aliases_len`：仓库别名字符串数组。
+/// - `opened_ptr` / `opened_len`：每个仓库的打开计数（u32 数组）。
+/// - `colors_ptr` / `colors_len`：每个仓库的颜色编码（u8 数组）。
+///
+/// # 返回值
+/// - `0`：成功。
+/// - `1`：参数非法、TOML 序列化失败或文件写入失败。
+///
+/// # 内存所有权
+/// 本函数不持有任何输出缓冲区；输入数组归调用方所有，函数内部仅做读取。
 #[no_mangle]
 pub unsafe extern "C" fn bt_save_repository_manager(
     path: *const c_char,
@@ -468,6 +531,14 @@ pub unsafe extern "C" fn bt_save_repository_manager(
     0
 }
 
+/// 释放 [`bt_get_repository_manager`] 返回的 [`BtRepositoryManager`]。
+///
+/// 会逐个释放 `source_dirs`、`ignore` 数组中的字符串及数组本身，
+/// 以及 `repositories` 数组中每个条目的 `path` / `alias` 字段、最后释放数组本身。
+/// 调用后结构体字段会被清零，重复释放安全。传入 `null` 安全。
+///
+/// # 内存所有权
+/// 仅可释放由 [`bt_get_repository_manager`] 填充的结构。
 #[no_mangle]
 pub unsafe extern "C" fn bt_release_repository_manager(p: *mut BtRepositoryManager) {
     if p.is_null() {

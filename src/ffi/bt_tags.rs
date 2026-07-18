@@ -1,3 +1,8 @@
+//! # Tag 详情读取
+//!
+//! 提供 [`bt_get_tag_details`] / [`bt_release_tag_details`]：
+//! 根据 OID 读取 annotated tag 对象，返回 tagger 信息、tag 名称与 tag message。
+
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::types::BtOid;
 use crate::ffi::winheap::{heap_alloc_c_string, heap_free};
@@ -5,6 +10,17 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::path::Path;
 
+/// annotated tag 详情。
+///
+/// # 字段
+/// - `tag_object_oid`：tag 指向的目标对象 OID（已 `peel` 到的最终对象）。
+/// - `tagger_name` / `tagger_email`：tagger 名字 / 邮箱（NUL 终止 UTF-8）。
+/// - `tagger_time`：tagger 时间戳（Unix 秒）。
+/// - `name`：tag 名称（NUL 终止 UTF-8）。
+/// - `message`：tag message（NUL 终止 UTF-8，已 trim）。
+///
+/// # 内存所有权
+/// 所有 `*mut c_char` 字段均通过进程堆分配，必须用 [`bt_release_tag_details`] 释放。
 #[repr(C)]
 pub struct BtTagDetails {
     pub tag_object_oid: BtOid,
@@ -15,6 +31,19 @@ pub struct BtTagDetails {
     pub message: *mut c_char,
 }
 
+/// 读取给定 OID 对应的 annotated tag 详情。
+///
+/// # 参数
+/// - `git_dir_path`：仓库 `.git` 目录（NUL 终止 UTF-8）。
+/// - `tag_oid`：待读取的 tag OID（按值传递，与原版 ABI 一致）。
+/// - `out_result`：输出 [`BtTagDetails`]，调用前可未初始化。
+///
+/// # 返回值
+/// - `0`：成功。
+/// - `1`：参数非法或仓库/tag/内存错误。
+///
+/// # 内存所有权
+/// 输出的 4 个字符串字段均通过进程堆分配，必须用 [`bt_release_tag_details`] 释放。
 #[no_mangle]
 pub unsafe extern "C" fn bt_get_tag_details(
     git_dir_path: *const c_char,
@@ -108,6 +137,13 @@ pub unsafe extern "C" fn bt_get_tag_details(
     0
 }
 
+/// 释放 [`bt_get_tag_details`] 返回的 [`BtTagDetails`] 中的字符串字段。
+///
+/// 会逐个释放 `tagger_name` / `tagger_email` / `name` / `message`；
+/// 不释放 `BtTagDetails` 结构体本身。传入 `null` 安全。
+///
+/// # 内存所有权
+/// 仅可释放由 [`bt_get_tag_details`] 填充的字段。
 #[no_mangle]
 pub unsafe extern "C" fn bt_release_tag_details(p: *mut BtTagDetails) {
     if p.is_null() {

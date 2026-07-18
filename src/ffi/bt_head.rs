@@ -1,9 +1,24 @@
+//! # HEAD 引用读取
+//!
+//! 提供 [`bt_get_head`] / [`bt_release_head`]：直接读取 `.git/HEAD` 文件，
+//! 返回 HEAD 的 OID（detached 状态）或符号引用名称（如 `refs/heads/main`）。
+
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::winheap::heap_free_u8;
 use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::path::{Path, PathBuf};
 
+/// HEAD 解析结果。
+///
+/// # 字段
+/// - `oid20`：20 字节 OID；当 HEAD 是符号引用（`ref: …`）时为全零。
+///   字节序与原版 DLL 一致：每 4 字节组内反序（小端 chunk 表示大端 u32）。
+/// - `_pad`：4 字节对齐填充，使 `ref_name` 落在偏移 0x18（与原版 ABI 一致）。
+/// - `ref_name`：符号引用目标（NUL 终止 UTF-8）；detached 时为 `null`。
+///
+/// # 内存所有权
+/// `ref_name` 通过进程堆分配，必须用 [`bt_release_head`] 释放。
 #[repr(C)]
 pub struct BtHead {
     pub oid20: [u8; 20],
@@ -11,6 +26,23 @@ pub struct BtHead {
     pub ref_name: *mut c_char,
 }
 
+/// 读取仓库 HEAD。
+///
+/// 行为：
+/// - HEAD 形如 `ref: refs/heads/main` → `oid20` 全零、`ref_name` = `"refs/heads/main"`；
+/// - HEAD 形如 40 字符 SHA-1 → `oid20` 填充、`ref_name` = `null`；
+/// - HEAD 为空或读取失败 → 返回错误。
+///
+/// # 参数
+/// - `git_dir_path`：仓库 `.git` 目录（NUL 终止 UTF-8）。
+/// - `out_head`：输出 [`BtHead`]，调用前可未初始化。
+///
+/// # 返回值
+/// - `0`：成功。
+/// - `1`：参数非法、HEAD 不存在/为空、UTF-8/OID 解析失败或内存不足。
+///
+/// # 内存所有权
+/// 输出的 `ref_name` 通过进程堆分配，必须用 [`bt_release_head`] 释放。
 #[no_mangle]
 pub unsafe extern "C" fn bt_get_head(git_dir_path: *const c_char, out_head: *mut BtHead) -> c_int {
     if git_dir_path.is_null() || out_head.is_null() {
@@ -53,6 +85,14 @@ pub unsafe extern "C" fn bt_get_head(git_dir_path: *const c_char, out_head: *mut
     }
 }
 
+/// 释放 [`bt_get_head`] 返回的 [`BtHead`] 中的 `ref_name` 字符串。
+///
+/// 仅释放 `ref_name`，不释放 `BtHead` 结构体本身（结构体通常由调用方在栈上持有）。
+/// 释放前会把首字节置 `0` 作为“毒化”标志，与原版 DLL 行为一致。
+/// 传入 `null` 安全。
+///
+/// # 内存所有权
+/// 仅可释放由 [`bt_get_head`] 填充的 `ref_name`。
 #[no_mangle]
 pub unsafe extern "C" fn bt_release_head(head: *mut BtHead) {
     if head.is_null() {

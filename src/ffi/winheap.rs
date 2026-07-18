@@ -1,3 +1,14 @@
+//! # Windows 进程堆封装
+//!
+//! 提供 `kernel32` 的 `HeapAlloc` / `HeapFree` 薄封装，
+//! 作为所有 FFI out 参数缓冲区的统一分配来源。
+//!
+//! # 内存所有权约定
+//! - 所有 `bt_*` 函数返回给调用方的缓冲区都必须经本模块分配；
+//! - 调用方释放时必须使用对应的 `bt_release_*` 函数（最终调用 [`heap_free`]），
+//!   **绝对不能**与 C 运行时的 `free` / `delete` / `CoTaskMemFree` 等混用，
+//!   否则会因堆不一致导致损坏。
+
 use core::ffi::c_void;
 use std::os::raw::c_char;
 
@@ -8,6 +19,13 @@ extern "system" {
     fn HeapFree(hHeap: *mut c_void, dwFlags: u32, lpMem: *mut c_void) -> i32;
 }
 
+/// 在 Windows 进程堆上分配 `bytes` 字节内存。
+///
+/// - `bytes == 0` 时返回 `null`（与原版 DLL 一致）；
+/// - 获取进程堆失败时也返回 `null`。
+///
+/// # 内存所有权
+/// 返回的指针必须由 [`heap_free`] 释放，不能使用 C 的 `free`。
 pub unsafe fn heap_alloc(bytes: usize) -> *mut u8 {
     if bytes == 0 {
         return core::ptr::null_mut();
@@ -19,6 +37,13 @@ pub unsafe fn heap_alloc(bytes: usize) -> *mut u8 {
     unsafe { HeapAlloc(heap, 0, bytes) as *mut u8 }
 }
 
+/// 释放由 [`heap_alloc`] 分配的内存。
+///
+/// 传入 `null` 是安全的（直接返回）。若获取进程堆失败则静默放弃释放。
+///
+/// # 内存所有权
+/// 仅可释放由本模块函数（`heap_alloc` / `heap_alloc_c_string` 等）返回的指针，
+/// 释放 C `malloc` / Rust 全局分配器返回的指针会损坏堆。
 pub unsafe fn heap_free(ptr: *mut c_void) {
     if ptr.is_null() {
         return;
@@ -32,10 +57,24 @@ pub unsafe fn heap_free(ptr: *mut c_void) {
     }
 }
 
+/// 等价于 [`heap_free`]，但接受 `*mut u8` 以便在 FFI 边界避免类型转换。
+///
+/// 语义与 [`heap_free`] 完全一致：仅可释放由本模块分配的字节缓冲区。
 pub unsafe fn heap_free_u8(ptr: *mut u8) {
     unsafe { heap_free(ptr as *mut c_void) }
 }
 
+/// 在进程堆上分配并以 `\0` 终止的 C 字符串副本。
+///
+/// # 参数
+/// - `s`: 任意 UTF-8 字符串切片；其字节会被原样复制并追加一个 `\0`。
+///
+/// # 返回
+/// - 成功：指向 NUL 终止字符串的 `*mut c_char`，需用 [`heap_free`] 释放。
+/// - 分配失败时返回 `null`。
+///
+/// # 内存所有权
+/// 返回的指针归调用方所有，必须使用 [`heap_free`] 释放。
 pub unsafe fn heap_alloc_c_string(s: &str) -> *mut c_char {
     let bytes = s.as_bytes();
     let n = bytes.len() + 1;
@@ -49,4 +88,5 @@ pub unsafe fn heap_alloc_c_string(s: &str) -> *mut c_char {
     }
     p as *mut c_char
 }
+
 

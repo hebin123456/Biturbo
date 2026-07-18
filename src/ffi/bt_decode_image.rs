@@ -1,7 +1,21 @@
+//! # 内嵌图像解码
+//!
+//! 提供 [`bt_decode_image`]：把 TGA（含 RLE）图像字节流解码为 BMP 字节流，
+//! 通过进程堆分配返回。原版 DLL 仅支持 TGA，对 PNG/JPG/BMP 等会直接返回错误。
+
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::winheap::heap_alloc;
 use std::os::raw::{c_int, c_void};
 
+/// 图像解码结果。
+///
+/// # 字段
+/// - `data`：BMP 字节流（含文件头与像素数据）。
+/// - `data_len` / `data_cap`：已用 / 已分配字节数。
+///
+/// # 内存所有权
+/// `data` 通过进程堆分配，必须用
+/// [`crate::ffi::bt_release_vec::bt_release_decode_image`] 释放。
 #[repr(C)]
 pub struct BtDecodeImageResult {
     pub data: *mut c_void,
@@ -9,6 +23,22 @@ pub struct BtDecodeImageResult {
     pub data_cap: i64,
 }
 
+/// 把 TGA 字节流解码为 BMP 字节流。
+///
+/// 仅支持未压缩 / RLE 的 truecolor（24/32bpp）与 grayscale（8bpp）TGA，
+/// 不支持 color-mapped 与其他图像类型。BMP 输出统一为 24bpp。
+///
+/// # 参数
+/// - `image_data_ptr` / `image_data_len`：TGA 输入字节流；`len < 0` 返回错误。
+/// - `out_result`：输出 [`BtDecodeImageResult`]，调用前可未初始化。
+///
+/// # 返回值
+/// - `0`：成功。
+/// - `1`：参数非法、输入非 TGA / TGA 损坏 / 内存不足。
+///
+/// # 内存所有权
+/// 输出的 `data` 通过进程堆分配，必须用
+/// [`crate::ffi::bt_release_vec::bt_release_decode_image`] 释放。
 #[no_mangle]
 pub unsafe extern "C" fn bt_decode_image(
     image_data_ptr: *const u8,

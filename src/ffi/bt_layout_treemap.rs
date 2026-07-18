@@ -1,8 +1,22 @@
+//! # 矩形 Treemap 布局
+//!
+//! 提供 [`bt_layout_treemap`]：把一组带“尺寸”的节点铺到给定矩形中，
+//! 返回每个节点对应的子矩形。算法刻意复刻原版 `biturbo.dll` 的行为，
+//! 包括把 `i64` 尺寸按无符号 `u64` 转 `f64`、特定边界情况下的占位输出等。
+//!
+//! # 错误码
+//! 与其他模块一致：`0` 成功、`1` 失败（参数非法 / panic / 内存不足）。
+
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::winheap::heap_alloc;
 use std::os::raw::c_int;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
+/// 二维矩形（左上角 + 宽高）。
+///
+/// # 字段
+/// - `x` / `y`：左上角坐标。
+/// - `w` / `h`：宽 / 高。
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BtRect {
@@ -12,6 +26,11 @@ pub struct BtRect {
     pub h: f64,
 }
 
+/// 单个 Treemap 输出条目。
+///
+/// # 字段
+/// - `index`：原始输入数组中的下标（用于把矩形映射回原始节点）。
+/// - `rect`：该节点被分配到的子矩形。
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct BtTreemapItem {
@@ -19,6 +38,11 @@ pub struct BtTreemapItem {
     pub rect: BtRect,
 }
 
+/// Treemap 布局结果。
+///
+/// # 内存所有权
+/// `items` 通过进程堆分配，必须用
+/// [`crate::ffi::bt_release_vec::bt_release_layout_treemap`] 释放。
 #[repr(C)]
 pub struct BtLayoutTreemapResult {
     pub items: *mut BtTreemapItem,
@@ -35,6 +59,23 @@ struct Node {
     size: f64,
 }
 
+/// 把一组尺寸铺到给定矩形，返回每个节点对应的子矩形。
+///
+/// 内部会捕获 panic 并返回 `1`，避免 C 侧因 Rust panic 而崩溃。
+/// 输入按原版 DLL 约定：负数尺寸按 `u64` 重解释为 `f64`。
+///
+/// # 参数
+/// - `sizes_ptr` / `sizes_len`：每个节点的尺寸（`i64` 数组，按无符号解释）。
+/// - `rect`：目标矩形。
+/// - `out_result`：输出 [`BtLayoutTreemapResult`]，调用前可未初始化。
+///
+/// # 返回值
+/// - `0`：成功。
+/// - `1`：参数非法、内部 panic 或内存不足。
+///
+/// # 内存所有权
+/// 输出的 `items` 数组通过进程堆分配，必须用
+/// [`crate::ffi::bt_release_vec::bt_release_layout_treemap`] 释放。
 #[no_mangle]
 pub unsafe extern "C" fn bt_layout_treemap(
     sizes_ptr: *const i64,

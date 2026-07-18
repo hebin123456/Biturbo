@@ -1,3 +1,8 @@
+//! # Git 树对象读取
+//!
+//! 提供 [`bt_get_tree`] / [`bt_release_tree`]：根据 OID 读取一个 Git tree
+//! 对象的条目（文件名 + 模式 + 子对象 OID），并以扁平数组形式跨 FFI 边界返回。
+
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::types::BtOid;
 use crate::ffi::winheap::{heap_alloc, heap_alloc_c_string, heap_free};
@@ -5,6 +10,17 @@ use std::ffi::CStr;
 use std::os::raw::{c_char, c_int};
 use std::path::Path;
 
+/// 单个 tree 条目。
+///
+/// # 字段
+/// - `kind`：条目模式（`filemode`），低 16 位。如 `0o100644` → 文件，
+///   `0o040000` → 目录（子树），`0o120000` → 符号链接。
+/// - `_pad`：对齐填充，未使用。
+/// - `filename`：NUL 终止的 UTF-8 文件名（进程堆分配）。
+/// - `treeish`：子对象的 OID。
+///
+/// # 内存所有权
+/// `filename` 与所在 [`BtTree`] 一并由 [`bt_release_tree`] 释放。
 #[repr(C)]
 pub struct BtTreeItem {
     pub kind: u16,
@@ -13,6 +29,10 @@ pub struct BtTreeItem {
     pub treeish: BtOid,
 }
 
+/// tree 条目扁平数组。
+///
+/// # 内存所有权
+/// `entries` 通过进程堆分配，必须用 [`bt_release_tree`] 释放。
 #[repr(C)]
 pub struct BtTree {
     pub entries: *mut BtTreeItem,
@@ -20,6 +40,20 @@ pub struct BtTree {
     pub entries_cap: i64,
 }
 
+/// 读取给定 OID 对应的 tree 对象，输出所有顶层条目。
+///
+/// # 参数
+/// - `git_dir_path`：仓库 `.git` 目录（NUL 终止 UTF-8）。
+/// - `oid_ptr`：指向待读取 tree 的 OID；为 `null` 返回错误。
+/// - `out_result`：输出 [`BtTree`]，调用前可未初始化。
+///
+/// # 返回值
+/// - `0`：成功（包括空 tree）。
+/// - `1`：参数非法或仓库/tree/内存错误。
+///
+/// # 内存所有权
+/// 输出的 `entries` 数组及其中每个 `filename` 都通过进程堆分配，
+/// 必须用 [`bt_release_tree`] 一次性释放。
 #[no_mangle]
 pub unsafe extern "C" fn bt_get_tree(
     git_dir_path: *const c_char,
@@ -124,6 +158,13 @@ pub unsafe extern "C" fn bt_get_tree(
     0
 }
 
+/// 释放 [`bt_get_tree`] 返回的 [`BtTree`]。
+///
+/// 会逐个释放每个 `BtTreeItem::filename`，最后释放 `entries` 数组本身。
+/// 调用后结构体内的字段会被清零，重复释放安全。传入 `null` 安全。
+///
+/// # 内存所有权
+/// 仅可释放由 [`bt_get_tree`] 填充的 `BtTree`。
 #[no_mangle]
 pub unsafe extern "C" fn bt_release_tree(p: *mut BtTree) {
     if p.is_null() {

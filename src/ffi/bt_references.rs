@@ -1,3 +1,10 @@
+//! # 仓库引用枚举
+//!
+//! 提供 [`bt_get_references`] / [`bt_release_references`]：
+//! 从 `.git` 目录直接读取 packed-refs、loose refs、HEAD 以及特殊引用
+//! （`ORIG_HEAD`、`FETCH_HEAD`、`MERGE_HEAD` 等），并按原版 DLL 的扁平布局
+//! 打包为 5 个 `BtBuf` + 1 个哈希值返回。
+
 use crate::ffi::error::set_last_error_str;
 use crate::ffi::types::{BtBuf, BtReferences, BtOid};
 use crate::ffi::winheap::{heap_alloc, heap_free};
@@ -16,6 +23,28 @@ struct NativeRefEntry {
     peeled_oid: BtOid,
 }
 
+/// 枚举仓库的所有引用。
+///
+/// 返回的 [`BtReferences`] 使用 5 个 `BtBuf` + 1 个哈希：
+/// - `a`：所有非符号引用的名称拼接（UTF-8 字节串，无分隔符）。
+/// - `b`：每个引用名称在 `a` 中的结束偏移（i64 数组）。
+/// - `c`：每个引用对应的 OID（[`BtOid`] 数组，tags 已 peel 到 commit）。
+/// - `d`：所有符号引用的“名称 + symref 目标”拼接（UTF-8 字节串）。
+/// - `e`：每个 symref 段在 `d` 中的结束偏移（i64 数组）。
+/// - `hash`：用于变更检测的稳定哈希值，编码了引用集、OID 和 `include_tags` 标志。
+///
+/// # 参数
+/// - `git_dir_path`：仓库 `.git` 目录（NUL 终止 UTF-8）。
+/// - `include_tags`：非零时**排除** `refs/tags/*`（命名沿用原版语义，实际为“跳过 tags”）。
+/// - `out_refs`：输出 [`BtReferences`]，调用前可未初始化。
+///
+/// # 返回值
+/// - `0`：成功。
+/// - `1`：参数非法或仓库/内存错误。
+///
+/// # 内存所有权
+/// `out_refs` 中的所有 `BtBuf.ptr` 通过进程堆分配，
+/// 必须用 [`bt_release_references`] 一次性释放，不能单独 `free`。
 #[no_mangle]
 pub unsafe extern "C" fn bt_get_references(
     git_dir_path: *const c_char,
@@ -440,6 +469,13 @@ fn parse_hex_oid(hex40: &str) -> Option<BtOid> {
     })
 }
 
+/// 释放 [`bt_get_references`] 返回的 [`BtReferences`]。
+///
+/// 会逐个释放 `a`..`e` 五个 `BtBuf.ptr`，**不会**清零结构体字段，
+/// 调用方不应在释放后再访问这些字段。传入 `null` 安全。
+///
+/// # 内存所有权
+/// 仅可释放由 [`bt_get_references`] 填充的 `BtReferences`。
 #[no_mangle]
 pub unsafe extern "C" fn bt_release_references(p: *mut BtReferences) {
     if p.is_null() {
