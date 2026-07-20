@@ -4,19 +4,24 @@
 [![Build](https://github.com/hebin123456/Biturbo/actions/workflows/build-windows.yml/badge.svg)](https://github.com/hebin123456/Biturbo/actions/workflows/build-windows.yml)
 [![Release](https://img.shields.io/github/v/release/hebin123456/Biturbo)](https://github.com/hebin123456/Biturbo/releases)
 
-> A Rust-based drop-in replacement for Git for Windows' `libgit2.dll`, with an
-> extended high-performance Git repository API on top.
+> A Rust-based `cdylib` that bundles vendored `libgit2` + `zlib` and exposes a
+> high-performance `bt_*` C ABI on top — Windows x64 (MSVC) only.
 
-Biturbo 是一个用 Rust 编写的 `cdylib`，作为 Git for Windows 中 `libgit2.dll`
-的兼容替代品。它在保持与原版 zlib / libgit2 ABI 完全兼容的同时，额外提供了一套
-面向上层应用的 `bt_*` C ABI 接口，涵盖提交图遍历、引用枚举、树对象读取、Tag 详情、
-Stash 管理、差异解析、语法高亮、Markdown 渲染、矩形 Treemap 布局、子进程管理等能力。
+Biturbo 是一个用 Rust 编写的 `cdylib`，内嵌 vendored `libgit2` + `zlib`，在其之上
+提供了一套面向上层应用的 `bt_*` C ABI 接口，涵盖提交图遍历、引用枚举、树对象读取、
+Tag 详情、Stash 管理、差异解析、语法高亮、Markdown 渲染、矩形 Treemap 布局、子进程
+管理等能力。
+
+> **注意**：Biturbo **不**导出 libgit2 的 `git_*` C API，因此**不是** `libgit2.dll`
+> 的兼容替代品；它只导出 zlib 符号与自身的 `bt_*` 接口。
 
 ## 特性
 
-- **zlib / libgit2 兼容** — 导出与原版 `libgit2.dll` 相同的 zlib 符号
+- **内嵌 vendored libgit2 / zlib** — 通过 `git2` crate（vendored-libgit2）静态链接
+  libgit2 与 zlib，单一 DLL 自包含，无需额外运行时依赖。
+- **zlib 符号导出** — 导出与 zlib 1.x ABI 兼容的符号
   （`compress`、`deflate`、`inflate`、`adler32`、`crc32`、`zlibVersion` 等），
-  可作为 `libgit2.dll` 的透明替代。
+  可作为 zlib ABI 兼容的动态库使用。
 - **高性能 Git 操作** — `bt_*` 系列 C ABI 函数覆盖提交查询、引用枚举、树对象读取、
   Tag 详情、Stash 管理、Revision 头信息、提交者统计等。
 - **附加能力** — 语法高亮、Markdown → HTML 渲染（表格、围栏代码块、任务列表）、
@@ -71,11 +76,6 @@ cargo test --lib --release --target x86_64-pc-windows-msvc
 ```
 
 ## 用法
-
-### 作为 libgit2.dll 的替代
-
-将编译好的 `biturbo.dll` 重命名为 `libgit2.dll`（或直接放置）到 Git for Windows 的
-`bin/` 目录下即可透明替换。Biturbo 导出全部 zlib 符号，保留原始 ABI 兼容性。
 
 ### 导出符号
 
