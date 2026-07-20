@@ -1,7 +1,8 @@
 //! 端到端测试：`bt_process` 子进程派生与取消令牌。
 //!
 //! 覆盖取消令牌生命周期、`bt_spawn_with_output` 正常派生与错误路径、
-//! 以及释放函数的安全性。子进程派生使用 `cmd.exe /c echo`，仅在 Windows CI 上运行。
+//! 以及释放函数的安全性。子进程派生在 Windows 上使用 `cmd.exe /c echo`，
+//! 在 Linux/macOS 上使用 `sh -c echo`。
 
 use biturbo::ffi::bt_process::{
     bt_kill_process_cancellation_token, bt_new_process_cancellation_token,
@@ -72,8 +73,11 @@ fn kill_released_token_returns_error() {
 }
 
 // ---------- bt_spawn_with_output ----------
+//
+// 下列测试在 Windows 上使用 cmd.exe /c echo，在 Linux/macOS 上使用 sh -c echo。
+// 错误路径测试（null path、null out_result、不存在的可执行文件）跨平台通用。
 
-/// 构造 `cmd.exe /c echo <text>` 的参数，返回 (path_cstr, args_vec)。
+#[cfg(windows)]
 fn make_echo_args(text: &str) -> (CString, Vec<CString>) {
     let path = CString::new("cmd.exe").unwrap();
     let args = vec![
@@ -84,9 +88,20 @@ fn make_echo_args(text: &str) -> (CString, Vec<CString>) {
     (path, args)
 }
 
+#[cfg(not(windows))]
+fn make_echo_args(text: &str) -> (CString, Vec<CString>) {
+    // Linux/macOS：sh -c "echo <text>"
+    let path = CString::new("sh").unwrap();
+    let args = vec![
+        CString::new("-c").unwrap(),
+        CString::new(format!("echo {}", text)).unwrap(),
+    ];
+    (path, args)
+}
+
 #[test]
 fn spawn_echo_collects_stdout() {
-    // 派生 cmd.exe /c echo hello，验证 stdout 包含 "hello"
+    // 派生子进程输出 "hello"，验证 stdout 包含 "hello"
     let (path, args) = make_echo_args("hello");
     let arg_ptrs: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
     let mut result = zeroed_spawn_result();
@@ -104,9 +119,9 @@ fn spawn_echo_collects_stdout() {
         )
     };
     assert_eq!(rc, 0, "spawn echo 应返回 0");
-    assert_eq!(result.status, 0, "cmd.exe /c echo 退出码应为 0");
+    assert_eq!(result.status, 0, "echo 退出码应为 0");
 
-    // stdout 应包含 "hello"（可能带 \r\n）
+    // stdout 应包含 "hello"（Windows 上可能带 \r\n）
     let stdout = unsafe {
         std::slice::from_raw_parts(result.stdout.ptr as *const u8, result.stdout.len)
     };
@@ -164,7 +179,7 @@ fn spawn_null_out_result_returns_error() {
 fn spawn_nonexistent_executable_returns_error() {
     // 不存在的可执行文件应 spawn 失败，返回 1
     // FFI 会先把 status 置 -1，再尝试 spawn
-    let path = CString::new("this_executable_does_not_exist_12345.exe").unwrap();
+    let path = CString::new("this_executable_does_not_exist_12345").unwrap();
     let mut result = zeroed_spawn_result();
     let rc = unsafe {
         bt_spawn_with_output(
@@ -183,18 +198,38 @@ fn spawn_nonexistent_executable_returns_error() {
     assert_eq!(result.status, -1, "spawn 失败时 status 应为 -1");
 }
 
-#[test]
-fn spawn_with_env_vars() {
-    // 通过环境变量传递值，用 cmd.exe /c echo %BT_TEST_E2E_VAR% 验证
+#[cfg(windows)]
+fn make_env_echo_args() -> (CString, Vec<CString>, CString, CString) {
+    // Windows: cmd.exe /c echo %BT_TEST_E2E_VAR%
     let path = CString::new("cmd.exe").unwrap();
-    let arg_c = CString::new("/c").unwrap();
-    let arg_echo = CString::new("echo").unwrap();
-    let arg_val = CString::new("%BT_TEST_E2E_VAR%").unwrap();
-    let args = vec![arg_c, arg_echo, arg_val];
-    let arg_ptrs: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
-
+    let args = vec![
+        CString::new("/c").unwrap(),
+        CString::new("echo").unwrap(),
+        CString::new("%BT_TEST_E2E_VAR%").unwrap(),
+    ];
     let env_key = CString::new("BT_TEST_E2E_VAR").unwrap();
     let env_val = CString::new("env_value_42").unwrap();
+    (path, args, env_key, env_val)
+}
+
+#[cfg(not(windows))]
+fn make_env_echo_args() -> (CString, Vec<CString>, CString, CString) {
+    // Linux/macOS: sh -c 'echo $BT_TEST_E2E_VAR'
+    let path = CString::new("sh").unwrap();
+    let args = vec![
+        CString::new("-c").unwrap(),
+        CString::new("echo $BT_TEST_E2E_VAR").unwrap(),
+    ];
+    let env_key = CString::new("BT_TEST_E2E_VAR").unwrap();
+    let env_val = CString::new("env_value_42").unwrap();
+    (path, args, env_key, env_val)
+}
+
+#[test]
+fn spawn_with_env_vars() {
+    // 通过环境变量传递值，子进程输出后验证 stdout 包含该值
+    let (path, args, env_key, env_val) = make_env_echo_args();
+    let arg_ptrs: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
     let env_ptrs: Vec<*const c_char> = vec![env_key.as_ptr(), env_val.as_ptr()];
 
     let mut result = zeroed_spawn_result();
@@ -224,14 +259,33 @@ fn spawn_with_env_vars() {
     unsafe { bt_release_spawn_with_output_result(&mut result) };
 }
 
+#[cfg(windows)]
+fn make_exit_args(code: &str) -> (CString, Vec<CString>) {
+    // Windows: cmd.exe /c exit <code>
+    let path = CString::new("cmd.exe").unwrap();
+    let args = vec![
+        CString::new("/c").unwrap(),
+        CString::new("exit").unwrap(),
+        CString::new(code).unwrap(),
+    ];
+    (path, args)
+}
+
+#[cfg(not(windows))]
+fn make_exit_args(code: &str) -> (CString, Vec<CString>) {
+    // Linux/macOS: sh -c 'exit <code>'
+    let path = CString::new("sh").unwrap();
+    let args = vec![
+        CString::new("-c").unwrap(),
+        CString::new(format!("exit {}", code)).unwrap(),
+    ];
+    (path, args)
+}
+
 #[test]
 fn spawn_exit_code_propagated() {
-    // cmd.exe /c exit 7 应返回退出码 7
-    let path = CString::new("cmd.exe").unwrap();
-    let arg_c = CString::new("/c").unwrap();
-    let arg_exit = CString::new("exit").unwrap();
-    let arg_code = CString::new("7").unwrap();
-    let args = vec![arg_c, arg_exit, arg_code];
+    // exit 7 应返回退出码 7
+    let (path, args) = make_exit_args("7");
     let arg_ptrs: Vec<*const c_char> = args.iter().map(|a| a.as_ptr()).collect();
 
     let mut result = zeroed_spawn_result();

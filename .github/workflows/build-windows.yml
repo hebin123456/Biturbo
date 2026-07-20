@@ -1,9 +1,9 @@
-name: Build Windows
+name: Build
 
 # Pushing a `v*` tag (or a manual workflow_dispatch) triggers this single
 # pipeline: build, test, verify, upload artifact, and on tag also publish a
-# GitHub Release. CI is folded in here so the DLL is built only once per tag.
-# Pushing to master does not trigger anything.
+# GitHub Release. CI is folded in here so the cdylib is built only once per
+# tag per platform. Pushing to master does not trigger anything.
 on:
   push:
     tags:
@@ -18,21 +18,61 @@ env:
 
 jobs:
   build:
-    name: Build + Test + Release (Windows x64, MSVC)
-    runs-on: windows-latest
+    name: Build + Test + Release (${{ matrix.os_name }} ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows x64 (MSVC) — libgit2.dll zlib ABI 兼容（保留原版序号）
+          - os: windows-latest
+            os_name: windows
+            arch: x64
+            target: x86_64-pc-windows-msvc
+            artifact_name: biturbo.dll
+            archive_prefix: biturbo-windows-x64
+            needs_msvc: true
+          # Linux x64 — libbiturbo.so
+          - os: ubuntu-latest
+            os_name: linux
+            arch: x64
+            target: x86_64-unknown-linux-gnu
+            artifact_name: libbiturbo.so
+            archive_prefix: biturbo-linux-x64
+            needs_msvc: false
+          # macOS x64 — libbiturbo.dylib
+          - os: macos-latest
+            os_name: macos
+            arch: x64
+            target: x86_64-apple-darwin
+            artifact_name: libbiturbo.dylib
+            archive_prefix: biturbo-macos-x64
+            needs_msvc: false
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install Rust toolchain (stable, MSVC)
+      - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
-          target: x86_64-pc-windows-msvc
+          target: ${{ matrix.target }}
 
       - name: Set up MSVC dev environment (for dumpbin)
+        if: matrix.needs_msvc
         uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Linux build deps (cmake + llvm)
+        if: matrix.os_name == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config
+
+      - name: Install macOS build deps (cmake)
+        if: matrix.os_name == 'macos'
+        run: brew install cmake ninja
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
@@ -60,21 +100,28 @@ jobs:
           grep -m1 -E '^version = ' Cargo.toml
 
       - name: Build release cdylib
-        run: cargo build --release --target x86_64-pc-windows-msvc
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Run unit + integration tests
         # 既跑 lib 单元测试，也跑 tests/ 下的 FFI 集成测试。
         # 不带 --lib，cargo test 会自动包含集成测试。
-        run: cargo test --release --target x86_64-pc-windows-msvc
+        run: cargo test --release --target ${{ matrix.target }}
 
-      - name: Verify build output (PE magic + size)
+      - name: Verify build output exists
         shell: bash
         run: |
           set -e
-          DLL="target/x86_64-pc-windows-msvc/release/biturbo.dll"
-          test -f "$DLL" || { echo "biturbo.dll not found"; exit 1; }
-          SIZE=$(wc -c < "$DLL")
-          echo "Built: $DLL ($SIZE bytes)"
+          LIB="target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
+          test -f "$LIB" || { echo "$LIB not found"; exit 1; }
+          SIZE=$(wc -c < "$LIB")
+          echo "Built: $LIB ($SIZE bytes)"
+
+      - name: Verify PE magic (Windows only)
+        if: matrix.os_name == 'windows'
+        shell: bash
+        run: |
+          set -e
+          DLL="target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
           # Sanity: first two bytes should be 'MZ' (PE/DLL magic).
           head -c 2 "$DLL" | od -An -c | grep -q 'M   Z' && echo "PE magic OK"
 
@@ -82,7 +129,7 @@ jobs:
         shell: bash
         run: |
           python3 scripts/check_exports.py \
-            target/x86_64-pc-windows-msvc/release/biturbo.dll \
+            "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" \
             biturbo.def
 
       - name: Stage release artifacts
@@ -90,21 +137,23 @@ jobs:
         shell: bash
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
-          STAGE="staging/biturbo-windows-x64-$VERSION"
+          STAGE="staging/${{ matrix.archive_prefix }}-$VERSION"
           mkdir -p "$STAGE"
-          cp "target/x86_64-pc-windows-msvc/release/biturbo.dll" "$STAGE/"
+          cp "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" "$STAGE/"
           cp biturbo.def "$STAGE/"
-          # Import library / export table, if produced.
-          cp "target/x86_64-pc-windows-msvc/release/biturbo.dll.lib" "$STAGE/" 2>/dev/null || true
-          cp "target/x86_64-pc-windows-msvc/release/biturbo.dll.exp" "$STAGE/" 2>/dev/null || true
-          (cd staging && 7z a -tzip "biturbo-windows-x64-$VERSION.zip" "biturbo-windows-x64-$VERSION")
+          # Windows 链接器产物（import library / export table），如存在则一并打包。
+          if [ "${{ matrix.os_name }}" = "windows" ]; then
+            cp "target/${{ matrix.target }}/release/biturbo.dll.lib" "$STAGE/" 2>/dev/null || true
+            cp "target/${{ matrix.target }}/release/biturbo.dll.exp" "$STAGE/" 2>/dev/null || true
+          fi
+          (cd staging && 7z a -tzip "${{ matrix.archive_prefix }}-$VERSION.zip" "${{ matrix.archive_prefix }}-$VERSION")
           ls -la staging
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: biturbo-windows-x64
-          path: target/x86_64-pc-windows-msvc/release/biturbo.dll
+          name: ${{ matrix.archive_prefix }}
+          path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
           if-no-files-found: error
 
       - name: Release on tag
@@ -115,6 +164,6 @@ jobs:
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           files: |
-            staging/biturbo-windows-x64-*.zip
-            staging/biturbo-windows-x64-*/biturbo.dll
-            staging/biturbo-windows-x64-*/biturbo.def
+            staging/${{ matrix.archive_prefix }}-*/${{ matrix.artifact_name }}
+            staging/${{ matrix.archive_prefix }}-*/biturbo.def
+            staging/${{ matrix.archive_prefix }}-*.zip

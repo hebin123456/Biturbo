@@ -4,8 +4,9 @@
 //! 共同组成 `biturbo.dll` 的 `bt_*` 系列接口及兼容 `libgit2.dll` 的辅助符号。
 //!
 //! 通用约定：
-//! - 所有 FFI out 参数返回的缓冲区均通过 Windows 进程堆分配，
-//!   必须使用对应的 `bt_release_*` 函数释放，不能与 C 的 `free` 混用。
+//! - 所有 FFI out 参数返回的缓冲区均通过 Biturbo 跨平台 FFI 分配器分配
+//!   （Windows 上为进程堆，Linux/macOS 上为 libc `malloc`），必须使用对应的
+//!   `bt_release_*` 函数释放，不能与 C 的 `free` 混用。
 //! - 错误码统一为 `BT_OK=0`、`BT_ERR=1`、`BT_ERR_CANCELED=2`（具体以各文件常量为准）。
 //! - 失败时可通过 [`bt_error`] 模块的 `bt_get_last_error_message` 取回最近一次错误描述。
 
@@ -53,7 +54,7 @@ pub mod bt_release_vec;
 pub mod error;
 /// 跨 FFI 边界共享的 C 兼容类型定义（`BtOid`、`BtBuf` 等）。
 pub mod types;
-/// Windows 进程堆（kernel32 `HeapAlloc`/`HeapFree`）封装。
+/// 跨平台 FFI 内存分配器（Windows 用 kernel32 `HeapAlloc`/`HeapFree`，Linux/macOS 用 libc `malloc`/`free`）。
 pub mod winheap;
 /// 强制链接 `libz-sys`，确保 zlib 符号被导出。
 pub mod zlib_touch;

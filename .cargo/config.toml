@@ -1,0 +1,13 @@
+# Biturbo 本地构建配置。
+#
+# 关键：libz-sys 在 Linux/macOS 上编译 zlib 时会传 `-fvisibility=hidden`，
+# 这会让所有 zlib 符号在 .so/.dylib 中变为 local 而无法被重导出。
+# 设置 `CFLAGS=-fvisibility=default` 让该标记被覆盖（GCC/Clang 中后出现的
+# `-fvisibility` 标志胜出），从而让 zlib 符号以默认（global）可见性编译。
+# Windows MSVC 不识别该标记，但 libz-sys 在 Windows 上根本不传
+# `-fvisibility=hidden`（参见其 build.rs），所以本设置对 Windows 无害
+# （cc crate 会把 GCC 风格的 flag 翻译/丢弃，cl.exe 不会报错）。
+#
+# 优先级：`force = false` 表示如果调用方已设置 `CFLAGS`，则尊重调用方的值。
+[env]
+CFLAGS = { value = "-fvisibility=default", force = false }

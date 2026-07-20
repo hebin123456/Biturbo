@@ -12,7 +12,7 @@
 //! ## 特性
 //!
 //! - **内嵌 vendored libgit2 / zlib** — 通过 `git2` crate（vendored-libgit2）静态
-//!   链接 libgit2 与 zlib，单一 DLL 自包含，无需额外运行时依赖。
+//!   链接 libgit2 与 zlib，单一动态库自包含，无需额外运行时依赖。
 //! - **zlib 符号导出** — 导出与 zlib 1.x ABI 兼容的符号
 //!   （`compress`、`deflate`、`inflate`、`adler32`、`crc32`、`zlibVersion` 等）。
 //! - **高性能 Git 操作** — `bt_*` 系列 C ABI 函数覆盖提交查询、引用枚举、树对象读取、
@@ -25,23 +25,26 @@
 //!
 //! ## 平台支持
 //!
-//! 当前仅支持 **Windows x64（MSVC）**：
-//! - [`ffi::winheap`] 通过 `kernel32` 的 `HeapAlloc` / `HeapFree` 管理内存，
-//!   作为整个 FFI 内存模型的基础。
-//! - `build.rs` 使用 MSVC 的 `/DEF:` 链接参数导出 `biturbo.def` 声明的符号。
+//! 支持 **Windows / Linux / macOS 三平台 x64**：
+//! - [`ffi::winheap`] 在 Windows 上通过 `kernel32` 的 `HeapAlloc` / `HeapFree`
+//!   管理内存，在 Linux/macOS 上通过 libc `malloc` / `free`。
+//! - `build.rs` 按 `CARGO_CFG_TARGET_OS` 分叉：Windows 用 MSVC `/DEF:`，
+//!   Linux 用 ld `--version-script`，macOS 用 `-exported_symbols_list`，
+//!   三者都以 `biturbo.def` 作为符号真源。
 //!
 //! ## FFI 内存管理约定
 //!
 //! 由 Biturbo 分配并通过 out 参数返回的缓冲区（如 `BtCommitsResult`、
 //! `BtLayoutTreemapResult` 等），**必须**使用对应的 `bt_release_*` 函数释放。
-//! 混用 C 侧的 `free` / `delete` 会导致堆损坏，因为 Biturbo 使用 Windows 进程堆分配。
+//! 混用 C 侧的 `free` / `delete` 会导致堆损坏——Windows 上 Biturbo 用进程堆，
+//! Linux/macOS 上用 libc `malloc`，调用方都应通过 `bt_release_*` 释放。
 //!
 //! ## 模块组织
 //!
 //! 实现按职责拆分在 [`ffi`] 下：提交图遍历、引用枚举、树对象读取、Tag 详情、
 //! Stash 管理、Revision 头信息、仓库管理器、Git 配置、Patch 解析、Markdown 渲染、
 //! 语法高亮、Treemap 布局、图像解码、子进程管理、取消令牌、OID 解析、
-//! 通用 Vec 释放、Windows 堆内存、zlib 符号导出等。
+//! 通用 Vec 释放、跨平台 FFI 堆分配、zlib 符号导出等。
 
 #![allow(non_snake_case)]
 

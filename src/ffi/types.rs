@@ -10,13 +10,13 @@ use std::os::raw::c_char;
 
 /// 跨 FFI 边界的原始 Vec/String-like 缓冲区。
 ///
-/// 由 Biturbo 在 Windows 进程堆上分配，调用方必须通过对应的 `bt_release_*` 函数释放，
-/// 不能混用 C 侧的 `free`。释放例程会检查 `cap != 0`，然后调用
-/// `HeapFree(GetProcessHeap(), 0, ptr)`。
+/// 由 Biturbo 在跨平台 FFI 分配器（Windows 上为进程堆，Linux/macOS 上为 libc malloc）
+/// 上分配，调用方必须通过对应的 `bt_release_*` 函数释放，不能混用 C 侧的 `free`。
+/// 释放例程会检查 `cap != 0`，然后调用对应平台的释放函数。
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct BtBuf {
-    /// 数据指针（指向 Windows 进程堆分配的内存）。
+    /// 数据指针（指向 Biturbo FFI 分配器分配的内存）。
     pub ptr: *mut c_void,
     /// 已使用长度（字节数）。
     pub len: usize,

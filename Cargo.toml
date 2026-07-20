@@ -1,6 +1,6 @@
 [package]
 name = "biturbo"
-version = "1.0.2"
+version = "1.1.0"
 edition = "2021"
 build = "build.rs"
 license = "MIT"
@@ -10,11 +10,18 @@ name = "biturbo"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-libz-sys = { version = "1.1", default-features = true }
+# 启用 libz-sys 的 `static` 特性：在 Linux/macOS 上从源码编译 zlib 并静态链接，
+# 这样所有 zlib 符号都会被定义在我们的 cdylib 内部（而不是依赖系统 libz.so），
+# 配合 src/ffi/zlib_touch.rs 的 `#[used]` anchor 才能被重导出给外部使用。
+# Windows 上 libz-sys 一律走 vendored 静态构建，本特性是冗余但无害的。
+libz-sys = { version = "1.1", default-features = true, features = ["static"] }
 markdown = { version = "=1.0.0", default-features = true }
 toml = "1.1.2"
 serde = { version = "1.0", features = ["derive"] }
 git2 = { version = "0.21.0", features = ["vendored-libgit2"] }
+# 仅在非 Windows 平台使用 libc 的 malloc/free 作为 FFI 内存分配器。
+[target.'cfg(not(windows))'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 # git2 已在 [dependencies] 中声明，这里只为集成测试显式启用。

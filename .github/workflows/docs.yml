@@ -1,10 +1,7 @@
 name: Docs
 
 # Build API documentation with `cargo doc` and publish it to GitHub Pages.
-# The crate is Windows-only (winheap links kernel32 + vendored libgit2), so
-# docs must be built on a Windows runner; the Pages deployment itself runs on
-# ubuntu where the official upload-pages-artifact / deploy-pages actions are
-# best supported.
+# docs.rs 默认在 Linux 上构建；本仓库在 Linux 上亦可构建文档（无 Windows 依赖）。
 on:
   push:
     branches: [master]
@@ -25,18 +22,18 @@ env:
 
 jobs:
   build:
-    name: Build docs (Windows x64)
-    runs-on: windows-latest
+    name: Build docs (Linux x64)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain (stable, MSVC)
+      - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
-        with:
-          target: x86_64-pc-windows-msvc
 
-      - name: Set up MSVC dev environment
-        uses: ilammy/msvc-dev-cmd@v1
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build pkg-config
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2
@@ -44,12 +41,12 @@ jobs:
           workspaces: .
 
       - name: Build documentation
-        run: cargo doc --no-deps --target x86_64-pc-windows-msvc
+        run: cargo doc --no-deps
 
       - name: Add root redirect to crate docs
         shell: bash
         run: |
-          DOC_DIR="target/x86_64-pc-windows-msvc/doc"
+          DOC_DIR="target/doc"
           # GitHub Pages serves from the repo root; redirect index to the
           # crate's own documentation directory.
           printf '<!DOCTYPE html><html><head><meta charset="utf-8"><meta http-equiv="refresh" content="0; url=biturbo/"><title>Biturbo docs</title></head><body>Redirecting to <a href="biturbo/">biturbo</a> API docs.</body></html>' > "$DOC_DIR/index.html"
@@ -58,7 +55,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: docs-site
-          path: target/x86_64-pc-windows-msvc/doc
+          path: target/doc
           retention-days: 7
 
   deploy:

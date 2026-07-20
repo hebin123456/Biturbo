@@ -1,8 +1,8 @@
 //! # 通用 `BtBuf` 释放函数集
 //!
 //! 原版 `biturbo.dll` 中多个 `bt_release_*` 函数共享同一 RVA，
-//! 内部实现等价于“按 `cap != 0` 判断后用进程堆 `HeapFree` 释放 `ptr`”。
-//! 本模块以 [`release_btbuf`] 为共享实现，对外暴露各具语义名称的导出函数。
+//! 内部实现等价于“按 `cap != 0` 判断后用 [`crate::ffi::winheap::heap_free`]
+//! 释放 `ptr`”。本模块以 [`release_btbuf`] 为共享实现，对外暴露各具语义名称的导出函数。
 
 use crate::ffi::types::BtBuf;
 use crate::ffi::winheap::heap_free;
@@ -90,10 +90,9 @@ pub unsafe extern "C" fn bt_release_search_commits(buf: *mut BtBuf) {
     unsafe { release_btbuf(buf) }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
-    // 这些测试仅在 Windows 平台下编译运行（依赖 kernel32 的 HeapFree）。
-    // Linux 沙箱无法链接 kernel32，故此模块在 Linux 上为空。
+    // 跨平台均可运行（winheap 在 Linux/macOS 上走 libc malloc/free）。
     use super::*;
 
     #[test]
@@ -104,7 +103,7 @@ mod tests {
 
     #[test]
     fn release_btbuf_zero_cap_is_safe() {
-        // cap == 0 时不应尝试 HeapFree（即使 ptr 非 null）
+        // cap == 0 时不应尝试释放（即使 ptr 非 null）
         let mut buf = BtBuf { ptr: core::ptr::null_mut(), len: 0, cap: 0 };
         unsafe { release_btbuf(&mut buf) };
     }
