@@ -1,4 +1,4 @@
-BITURBO_1.1.0 {
+{
   global:
     adler32;
     adler32_combine;

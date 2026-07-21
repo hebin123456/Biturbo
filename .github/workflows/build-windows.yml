@@ -47,15 +47,8 @@ jobs:
             artifact_name: libbiturbo.so
             archive_prefix: biturbo-linux-arm64
             needs_msvc: false
-          # macOS x64 — libbiturbo.dylib（native Intel runner）
-          - os: macos-13
-            os_name: macos
-            arch: x64
-            target: x86_64-apple-darwin
-            artifact_name: libbiturbo.dylib
-            archive_prefix: biturbo-macos-x64
-            needs_msvc: false
           # macOS ARM64 — libbiturbo.dylib（native Apple Silicon runner）
+          # 仅构建 ARM64（Apple Silicon，2020 年后 Mac 主流架构）；不构建 x64
           - os: macos-14
             os_name: macos
             arch: arm64
