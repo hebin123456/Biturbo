@@ -39,13 +39,29 @@ jobs:
             artifact_name: libbiturbo.so
             archive_prefix: biturbo-linux-x64
             needs_msvc: false
-          # macOS x64 — libbiturbo.dylib
-          - os: macos-latest
+          # Linux ARM64 — libbiturbo.so（native ARM64 runner，无需 QEMU 仿真）
+          - os: ubuntu-24.04-arm
+            os_name: linux
+            arch: arm64
+            target: aarch64-unknown-linux-gnu
+            artifact_name: libbiturbo.so
+            archive_prefix: biturbo-linux-arm64
+            needs_msvc: false
+          # macOS x64 — libbiturbo.dylib（native Intel runner）
+          - os: macos-13
             os_name: macos
             arch: x64
             target: x86_64-apple-darwin
             artifact_name: libbiturbo.dylib
             archive_prefix: biturbo-macos-x64
+            needs_msvc: false
+          # macOS ARM64 — libbiturbo.dylib（native Apple Silicon runner）
+          - os: macos-14
+            os_name: macos
+            arch: arm64
+            target: aarch64-apple-darwin
+            artifact_name: libbiturbo.dylib
+            archive_prefix: biturbo-macos-arm64
             needs_msvc: false
 
     runs-on: ${{ matrix.os }}
