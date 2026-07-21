@@ -39,14 +39,6 @@ jobs:
             artifact_name: libbiturbo.so
             archive_prefix: biturbo-linux-x64
             needs_msvc: false
-          # Linux ARM64 — libbiturbo.so（native ARM64 runner，无需 QEMU 仿真）
-          - os: ubuntu-24.04-arm
-            os_name: linux
-            arch: arm64
-            target: aarch64-unknown-linux-gnu
-            artifact_name: libbiturbo.so
-            archive_prefix: biturbo-linux-arm64
-            needs_msvc: false
           # macOS ARM64 — libbiturbo.dylib（native Apple Silicon runner）
           # 仅构建 ARM64（Apple Silicon，2020 年后 Mac 主流架构）；不构建 x64
           - os: macos-14

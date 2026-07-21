@@ -2,25 +2,22 @@
 
 ## v1.1.1
 
-本次发布扩展构建矩阵，新增 Linux ARM64 与 macOS ARM64 两个原生平台产物。
+本次发布扩展构建矩阵，新增 macOS ARM64（Apple Silicon）原生平台产物。
 
 ### 新增
 
-- **Linux ARM64 构建**（`aarch64-unknown-linux-gnu`）
-  - CI 使用 GitHub 官方 `ubuntu-24.04-arm` standard runner（native ARM64，无需 QEMU 仿真）
-  - 产物 `libbiturbo.so` 归档为 `biturbo-linux-arm64-1.1.1.zip`
 - **macOS ARM64 构建**（`aarch64-apple-darwin`）
   - CI 使用 `macos-14`（Apple Silicon M1）standard runner
   - 产物 `libbiturbo.dylib` 归档为 `biturbo-macos-arm64-1.1.1.zip`
   - 仅构建 ARM64（Apple Silicon，2020 年后 Mac 主流架构），不再构建 x64
 
-### 修复
+### 已知限制
 
-- **Linux ARM64 链接失败**：`biturbo.exports.map` 此前使用了带版本标签的
-  `BITURBO_1.1.0 { ... };` 格式，与 rustc 自动生成的 anonymous 版本脚本同时
-  传给 `ld` 时会触发 `anonymous version tag cannot be combined with other
-  version tags` 错误（aarch64 binutils 较严格，x86_64 较宽松所以未暴露）。
-  改为 anonymous 版本脚本（直接 `{ global: ... local: *; };`，无版本标签）。
+- **Linux ARM64 暂未纳入 CI**：aarch64 binutils 的 `ld` 不允许同时传两个
+  `--version-script`（rustc 自动生成一个 + 本仓库 `biturbo.exports.map` 一个），
+  触发 `anonymous version tag cannot be combined with other version tags`。
+  即便 `biturbo.exports.map` 改为 anonymous 版本脚本仍无法绕过。后续需要改用
+  `--dynamic-list` 或 Rust `#[no_mangle]` 默认导出机制才能支持，暂搁置。
 
 ### 平台覆盖
 
@@ -28,7 +25,6 @@
 |------|--------|--------|------|
 | Windows x64 | `x86_64-pc-windows-msvc` | `windows-latest` | `biturbo.dll` |
 | Linux x64 | `x86_64-unknown-linux-gnu` | `ubuntu-latest` | `libbiturbo.so` |
-| Linux ARM64 | `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` | `libbiturbo.so` |
 | macOS ARM64 | `aarch64-apple-darwin` | `macos-14` | `libbiturbo.dylib` |
 
 CI matrix `fail-fast: false`，单平台失败不影响其他平台构建。
