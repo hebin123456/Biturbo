@@ -32,7 +32,12 @@ jobs:
             archive_prefix: biturbo-windows-x64
             needs_msvc: true
           # Linux x64 — libbiturbo.so
-          - os: ubuntu-latest
+          # 锁定 ubuntu-22.04（glibc 2.35）而非 ubuntu-latest（24.04, glibc 2.39）：
+          # cdylib 会记录构建机的 glibc 符号版本下限，在 24.04 上构建会引入
+          # GLIBC_2.39 依赖（pidfd_* 等），导致 Ubuntu 22.04 等主流 LTS 无法加载
+          # （version `GLIBC_2.39' not found）。glibc 只向前兼容，在老基线构建
+          # 的产物可同时跑在 22.04 / 24.04 及更新发行版上。
+          - os: ubuntu-22.04
             os_name: linux
             arch: x64
             target: x86_64-unknown-linux-gnu
@@ -132,6 +137,22 @@ jobs:
           python3 scripts/check_exports.py \
             "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" \
             biturbo.def
+
+      - name: Verify glibc baseline (Linux only, must be <= 2.35)
+        # 守护步骤：防止 runner 镜像悄悄升级导致产物 glibc 下限回升。
+        # 产物依赖的最高 GLIBC 符号版本不得超过 ubuntu-22.04 基线（2.35）。
+        if: matrix.os_name == 'linux'
+        shell: bash
+        run: |
+          set -e
+          LIB="target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
+          MAX=$(objdump -T "$LIB" | grep -oE 'GLIBC_2\.[0-9]+' | sort -uV | tail -1 | cut -d. -f2)
+          echo "Highest glibc symbol version required: 2.${MAX:-0}"
+          if [ -n "$MAX" ] && [ "$MAX" -gt 35 ]; then
+            echo "::error::libbiturbo.so requires glibc 2.$MAX > 2.35 (Ubuntu 22.04 baseline). Pin the Linux runner to ubuntu-22.04."
+            exit 1
+          fi
+          echo "glibc baseline OK (<= 2.35)"
 
       - name: Stage release artifacts
         if: startsWith(github.ref, 'refs/tags/v')

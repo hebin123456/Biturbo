@@ -1,5 +1,30 @@
 # Release Notes
 
+## v1.1.2
+
+本次发布修复 Linux 产物的 glibc 兼容性问题：v1.1.0/v1.1.1 的 `libbiturbo.so`
+在 `ubuntu-latest`（24.04, glibc 2.39）上构建，携带 `GLIBC_2.39` 符号版本依赖
+（`pidfd_spawnp` / `pidfd_getpid` 等），导致 Ubuntu 22.04（glibc 2.35）及多数
+LTS 发行版加载失败：`version 'GLIBC_2.39' not found`。
+
+### 修复
+
+- **Linux x64 构建基线降级**：CI runner 从 `ubuntu-latest` 锁定为 `ubuntu-22.04`
+  （glibc 2.35）。glibc 动态链接只向前兼容（新系统可跑老二进制，反之不行），
+  在 2.35 基线构建的产物可同时运行在 22.04 / 24.04 / 26.04 及更新的 glibc 发行版上，
+  仅在 <2.35 的极老系统上不可用。
+- 构建后产物验证基线同步：`objdump -T` 最高符号版本应 ≤ `GLIBC_2.35`。
+
+### 平台覆盖
+
+| 平台 | target | runner | 产物 | glibc 基线 |
+|------|--------|--------|------|-----------|
+| Windows x64 | `x86_64-pc-windows-msvc` | `windows-latest` | `biturbo.dll` | — |
+| Linux x64 | `x86_64-unknown-linux-gnu` | `ubuntu-22.04` | `libbiturbo.so` | 2.35 |
+| macOS ARM64 | `aarch64-apple-darwin` | `macos-14` | `libbiturbo.dylib` | — |
+
+CI matrix `fail-fast: false`，单平台失败不影响其他平台构建。
+
 ## v1.1.1
 
 本次发布扩展构建矩阵，新增 macOS ARM64（Apple Silicon）原生平台产物。
