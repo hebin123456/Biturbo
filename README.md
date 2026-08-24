@@ -5,7 +5,7 @@
 [![Release](https://img.shields.io/github/v/release/hebin123456/Biturbo)](https://github.com/hebin123456/Biturbo/releases)
 
 > A Rust-based `cdylib` that bundles vendored `libgit2` + `zlib` and exposes a
-> high-performance `bt_*` C ABI on top — Windows / Linux (x64) + macOS (ARM64).
+> high-performance `bt_*` C ABI on top — Windows / Linux (x64/ARM64) + macOS (ARM64).
 
 Biturbo 是一个用 Rust 编写的 `cdylib`，内嵌 vendored `libgit2` + `zlib`，在其之上
 提供了一套面向上层应用的 `bt_*` C ABI 接口，涵盖提交图遍历、引用枚举、树对象读取、
@@ -35,16 +35,19 @@ Tag 详情、Stash 管理、差异解析、语法高亮、Markdown 渲染、矩�
 
 ## 平台支持
 
-支持 **Windows / Linux (x64) + macOS (ARM64) 三平台**：
+支持 **Windows / Linux (x64/ARM64) + macOS (ARM64) 四平台**：
 
 | 平台 | target | 产物 | FFI 内存分配器 | 符号导出机制 |
 |------|--------|------|----------------|--------------|
 | Windows x64 | `x86_64-pc-windows-msvc` | `biturbo.dll` | kernel32 `HeapAlloc` / `HeapFree` | MSVC `/DEF:` + 序号 |
 | Linux x64   | `x86_64-unknown-linux-gnu` | `libbiturbo.so` | libc `malloc` / `free` | ld `--version-script` |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | `libbiturbo.so`（release 资产 `libbiturbo-arm64.so`） | libc `malloc` / `free` | ld `--version-script` |
 | macOS ARM64 | `aarch64-apple-darwin` | `libbiturbo.dylib` | libc `malloc` / `free` | `-exported_symbols_list` |
 
 > macOS 仅构建 ARM64（Apple Silicon，2020 年后 Mac 主流架构），不再提供 x64 产物。
-> Linux 暂仅构建 x64（ARM64 构建因 ld 版本脚本兼容性问题暂未纳入 CI）。
+> Linux 同时构建 x64 与 ARM64：ARM64 在 GitHub 原生 ARM64 runner（`ubuntu-22.04-arm`，
+> 公开仓库免费）上原生构建，不做交叉编译。两条 Linux 腿均显式使用工具链自带的
+> rust-lld（见下方"符号导出"与构建说明），规避 GNU ld 的双版本脚本冲突。
 
 - [src/ffi/winheap.rs](./src/ffi/winheap.rs) 在 Windows 上使用 `kernel32` 的进程堆，
   在 Linux/macOS 上使用 libc `malloc`/`free`；调用方对内部使用的堆无感知，只需保证
@@ -55,17 +58,27 @@ Tag 详情、Stash 管理、差异解析、语法高亮、Markdown 渲染、矩�
 - `biturbo.def` 中的 `LIBRARY` 行与 `@ORDINAL` 序号仅 Windows 链接器使用；
   Linux/macOS 忽略这些字段，只读取符号名。
 - Linux `biturbo.exports.map` 采用 anonymous 版本脚本（`{ global: ... local: *; };`，
-  无版本标签），避免与 rustc 自动生成的 anonymous 版本脚本冲突。
+  无版本标签）。注意 rustc 链接 cdylib 时也会注入自己的 anonymous 版本脚本：
+  GNU ld 不允许两个 anonymous 脚本共存（`anonymous version tag cannot be combined
+  with other version tags`），lld 则按命令行合并两份脚本，且精确符号匹配优先于
+  `local: *` 通配，`biturbo.exports.map` 列出的符号仍全部导出。因此 **Linux 构建必须
+  用 lld**：x86_64 上 rustc 默认即工具链自带 rust-lld；aarch64（无论原生还是交叉）
+  默认走 GNU ld，需要按构建说明显式切换到 rust-lld。
 
 ## 下载
 
 预编译产物可从 [Releases](https://github.com/hebin123456/Biturbo/releases) 页获取。
-每个 Release 附带三平台产物：
+每个 Release 附带四平台产物：
 
 - `biturbo-windows-x64-<version>.zip`   — 含 `biturbo.dll`、`biturbo.def`、`biturbo.dll.lib`
 - `biturbo-linux-x64-<version>.zip`     — 含 `libbiturbo.so`、`biturbo.def`
+- `biturbo-linux-arm64-<version>.zip`   — 含 `libbiturbo-arm64.so`、`biturbo.def`
 - `biturbo-macos-arm64-<version>.zip`   — 含 `libbiturbo.dylib`、`biturbo.def`
 - 单独的动态库 / `.def` 文件
+
+> Linux ARM64 的 Release 裸资产名为 `libbiturbo-arm64.so`（与 x64 的 `libbiturbo.so`
+> 区分以避免同名冲突），使用时重命名为 `libbiturbo.so` 即可（运行时按库名
+> `libbiturbo.so` 加载）。
 
 ## 构建
 
@@ -81,6 +94,7 @@ Tag 详情、Stash 管理、差异解析、语法高亮、Markdown 渲染、矩�
 |------|--------|----------|
 | Windows x64 | `x86_64-pc-windows-msvc` | Visual Studio Build Tools（MSVC + Windows SDK），提供 `link.exe` 和 `dumpbin` |
 | Linux x64   | `x86_64-unknown-linux-gnu` | `pkg-config`、`ninja-build`（可选，加速 vendored 构建） |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | 原生 ARM64 机器（或自行配置交叉工具链）；`pkg-config`、`ninja-build`（可选）；链接器需走 rust-lld（见下方说明） |
 | macOS ARM64 | `aarch64-apple-darwin` | Xcode Command Line Tools；`brew install cmake ninja` |
 
 ### 编译
@@ -91,6 +105,9 @@ cargo build --release --target x86_64-pc-windows-msvc
 
 # Linux x64
 cargo build --release --target x86_64-unknown-linux-gnu
+
+# Linux ARM64（在原生 ARM64 机器上构建）
+cargo build --release --target aarch64-unknown-linux-gnu
 
 # macOS ARM64
 cargo build --release --target aarch64-apple-darwin
@@ -104,11 +121,25 @@ cargo build --release --target aarch64-apple-darwin
 > cdylib 重导出）。如果你在 CI 之外构建并需要自定义 `CFLAGS`，请确保
 > 同时带上 `-fvisibility=default`。
 
+> **Linux 链接器注意**：本地在 **Linux ARM64** 上构建时，rustc 默认走 GNU ld，
+> 会与 `biturbo.exports.map` 触发双版本脚本冲突；需显式切换到工具链自带的
+> rust-lld（x86_64 上 rustc 默认即 rust-lld，无需处理；CI 已自动配置）：
+>
+> ```bash
+> LD_DIR="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/gcc-ld"
+> RUSTFLAGS="-C link-arg=-B$LD_DIR -C link-arg=-fuse-ld=lld" \
+>   cargo build --release --target aarch64-unknown-linux-gnu
+> ```
+>
+> 交叉编译到 aarch64 时把路径中的 host 换成 `aarch64-unknown-linux-gnu` 即可
+> （`gcc-ld` 目录按链接的 target 而非 host 定位）。
+
 ### 单元测试
 
 ```bash
 cargo test --release --target x86_64-pc-windows-msvc
 cargo test --release --target x86_64-unknown-linux-gnu
+cargo test --release --target aarch64-unknown-linux-gnu
 cargo test --release --target aarch64-apple-darwin
 ```
 
@@ -139,12 +170,12 @@ C 侧的 `free` / `delete` 会导致堆损坏——Windows 上 Biturbo 用进程
 
 | 流水线 | 触发条件 | 作用 |
 |--------|----------|------|
-| **Build** | 推送 `v*` tag 或手动触发 | 单条 matrix workflow 同时在 windows / ubuntu / macos runner 上构建、跑测试、校验导出符号、上传 artifact、打 tag 时打包并发布三平台 GitHub Release |
+| **Build** | 推送 `v*` tag 或手动触发 | 单条 matrix workflow 同时在 windows / ubuntu(x64+ARM64) / macos runner 上构建、跑测试、校验导出符号、上传 artifact、打 tag 时打包并发布四平台 GitHub Release |
 | **Bump & Tag** | 手动触发 | 自动 bump 版本（patch/minor/major/prerelease）、改 `Cargo.toml`、打 tag（间接触发 Build） |
 | **Docs** | 推送 `master` 或手动触发 | 在 Linux runner 上跑 `cargo doc` 并部署到 GitHub Pages |
 
 > 推送到 `master` 分支只触发 Docs 流水线（部署 API 文档），**不会**触发构建。发版统一
-> 通过打 `v*` tag 进行；一次 tag 同时触发三个平台的并行构建，各平台独立产物。
+> 通过打 `v*` tag 进行；一次 tag 同时触发四个平台的并行构建，各平台独立产物。
 
 ### 发新版本
 

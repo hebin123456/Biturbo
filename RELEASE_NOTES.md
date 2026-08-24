@@ -1,5 +1,40 @@
 # Release Notes
 
+## v1.1.3
+
+本次发布新增 Linux ARM64（aarch64）平台产物。
+
+### 新增
+
+- **Linux ARM64 构建**（`aarch64-unknown-linux-gnu`）
+  - CI 使用 GitHub 公开仓库免费提供的原生 ARM64 runner（`ubuntu-22.04-arm`），
+    glibc 基线与 Linux x64 一致（2.35），产物在 Ubuntu 22.04 / 24.04 及更新
+    发行版上均可加载。
+  - 使用原生 ARM64 runner，不做交叉编译。两条 Linux 构建腿均显式改用工具链
+    自带的 rust-lld（CI 中通过 RUSTFLAGS 注入 `-B<sysroot>/gcc-ld` +
+    `-fuse-ld=lld`）：rustc 链接 cdylib 时会注入自己的 anonymous 版本脚本，
+    与 `biturbo.exports.map`（同为 anonymous 脚本）在 GNU ld 下无法共存
+    （`anonymous version tag cannot be combined with other version tags`，
+    v1.1.1 已知限制）；lld 则按命令行合并两份脚本，且精确符号匹配优先于
+    `local: *` 通配，导出列表不受影响。x86_64 上 rustc 默认即 rust-lld，
+    aarch64 上默认 GNU ld，显式指定使两腿链路一致，也免受 rustc 默认
+    链接器变动影响。
+  - Release 裸资产名为 `libbiturbo-arm64.so`（与 x64 的 `libbiturbo.so` 区分，
+    避免两个矩阵 job 上传同名资产冲突），使用时重命名为 `libbiturbo.so` 即可
+    （运行时按库名 `libbiturbo.so` 加载）；归档为
+    `biturbo-linux-arm64-1.1.3.zip`。
+
+### 平台覆盖
+
+| 平台 | target | runner | 产物 | glibc 基线 |
+|------|--------|--------|------|-----------|
+| Windows x64 | `x86_64-pc-windows-msvc` | `windows-latest` | `biturbo.dll` | — |
+| Linux x64 | `x86_64-unknown-linux-gnu` | `ubuntu-22.04` | `libbiturbo.so` | 2.35 |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | `ubuntu-22.04-arm` | `libbiturbo-arm64.so` | 2.35 |
+| macOS ARM64 | `aarch64-apple-darwin` | `macos-14` | `libbiturbo.dylib` | — |
+
+CI matrix `fail-fast: false`，单平台失败不影响其他平台构建。
+
 ## v1.1.2
 
 本次发布修复 Linux 产物的 glibc 兼容性问题：v1.1.0/v1.1.1 的 `libbiturbo.so`

@@ -31,6 +31,7 @@ jobs:
             artifact_name: biturbo.dll
             archive_prefix: biturbo-windows-x64
             needs_msvc: true
+            release_asset: biturbo.dll
           # Linux x64 — libbiturbo.so
           # 锁定 ubuntu-22.04（glibc 2.35）而非 ubuntu-latest（24.04, glibc 2.39）：
           # cdylib 会记录构建机的 glibc 符号版本下限，在 24.04 上构建会引入
@@ -44,6 +45,27 @@ jobs:
             artifact_name: libbiturbo.so
             archive_prefix: biturbo-linux-x64
             needs_msvc: false
+            release_asset: libbiturbo.so
+          # Linux ARM64 — libbiturbo.so（GitHub 原生 ARM64 runner，公开仓库免费）
+          # rustc 1.9x 起，所有 Linux cdylib 链接 rustc 都会注入自己的 anonymous
+          # 版本脚本（列出 #[no_mangle] 符号 + local: *）。x86_64 上 rustc 默认用
+          # 工具链自带 rust-lld——lld 能与 build.rs 传入的 biturbo.exports.map
+          # （同为 anonymous 脚本）共存；aarch64 上 rustc 默认走 GNU ld，双匿名
+          # 脚本报错：anonymous version tag cannot be combined with other version
+          # tags。因此 Linux 两腿都显式改用工具链自带 rust-lld（见下方
+          # "Use bundled rust-lld" 步骤），与 x64 的实际链路完全一致。
+          # runner 同为 ubuntu-22.04 系（glibc 2.35 基线对齐）。
+          # release 裸资产名用 libbiturbo-arm64.so 与 x64 的 libbiturbo.so 区分
+          # （两个矩阵 job 同时上传同名资产会冲突）；下载方重命名为 libbiturbo.so
+          # 使用（运行时 DllImport 的库名不变）。
+          - os: ubuntu-22.04-arm
+            os_name: linux
+            arch: arm64
+            target: aarch64-unknown-linux-gnu
+            artifact_name: libbiturbo.so
+            archive_prefix: biturbo-linux-arm64
+            needs_msvc: false
+            release_asset: libbiturbo-arm64.so
           # macOS ARM64 — libbiturbo.dylib（native Apple Silicon runner）
           # 仅构建 ARM64（Apple Silicon，2020 年后 Mac 主流架构）；不构建 x64
           - os: macos-14
@@ -53,6 +75,7 @@ jobs:
             artifact_name: libbiturbo.dylib
             archive_prefix: biturbo-macos-arm64
             needs_msvc: false
+            release_asset: libbiturbo.dylib
 
     runs-on: ${{ matrix.os }}
 
@@ -75,6 +98,24 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build pkg-config
+
+      - name: Use bundled rust-lld (Linux)
+        # rustc 链接 cdylib 时会注入自己的 anonymous 版本脚本；GNU ld 无法与
+        # build.rs 传入的 biturbo.exports.map（同为 anonymous 脚本）共存
+        # （anonymous version tag cannot be combined with other version tags），
+        # rust-lld 则按"精确符号匹配优先于 local: * 通配"合并两份脚本。
+        # x86_64 上 rustc 本就默认使用工具链自带 rust-lld；aarch64 上默认
+        # GNU ld，故显式切换到同一份 rust-lld（-B 指向 sysroot 内 gcc-ld
+        # 目录 + -fuse-ld=lld），使两腿 Linux 构建链路一致，也免受 rustc
+        # 默认链接器变动影响。
+        if: matrix.os_name == 'linux'
+        run: |
+          set -e
+          SYSROOT="$(rustc --print sysroot)"
+          LD_DIR="$SYSROOT/lib/rustlib/${{ matrix.target }}/bin/gcc-ld"
+          test -x "$LD_DIR/ld.lld" || { echo "::error::bundled ld.lld not found at $LD_DIR"; exit 1; }
+          echo "Using bundled rust-lld: $LD_DIR/ld.lld"
+          echo "RUSTFLAGS=-C link-arg=-B$LD_DIR -C link-arg=-fuse-ld=lld" >> "$GITHUB_ENV"
 
       - name: Install macOS build deps (cmake)
         if: matrix.os_name == 'macos'
@@ -161,7 +202,9 @@ jobs:
           VERSION="${{ steps.ver.outputs.version }}"
           STAGE="staging/${{ matrix.archive_prefix }}-$VERSION"
           mkdir -p "$STAGE"
-          cp "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" "$STAGE/"
+          # release_asset：Release 裸资产名（Linux ARM64 为 libbiturbo-arm64.so，
+          # 避免与 x64 的 libbiturbo.so 同名冲突；其余平台与产物同名）。
+          cp "target/${{ matrix.target }}/release/${{ matrix.artifact_name }}" "$STAGE/${{ matrix.release_asset }}"
           cp biturbo.def "$STAGE/"
           # Windows 链接器产物（import library / export table），如存在则一并打包。
           if [ "${{ matrix.os_name }}" = "windows" ]; then
@@ -186,6 +229,6 @@ jobs:
           tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           files: |
-            staging/${{ matrix.archive_prefix }}-*/${{ matrix.artifact_name }}
+            staging/${{ matrix.archive_prefix }}-*/${{ matrix.release_asset }}
             staging/${{ matrix.archive_prefix }}-*/biturbo.def
             staging/${{ matrix.archive_prefix }}-*.zip

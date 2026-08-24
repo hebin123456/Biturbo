@@ -15,11 +15,19 @@ fn main() {
         // /DEF: 会强制导出列表中的所有符号，即使本 crate 代码没有引用它们。
         println!("cargo:rustc-cdylib-link-arg=/DEF:{}", def_path.display());
     } else if target_os == "linux" {
-        // Linux：libz-sys 编译 zlib 时启用了 `-fvisibility=hidden`，导致所有 zlib
-        // 符号在 .so 中是 local 而非 global。链接器版本脚本可以显式列出需要导出
-        // 的符号并把它们提升为 dynamic symbol table 中的 global 项。
-        // `src/ffi/zlib_touch.rs` 中的 `#[used] static ZLIB_ANCHORS` 负责把 zlib
-        // 静态库中的对象代码拉入链接输入，本脚本再把这些符号从 local 提升为 global。
+        // Linux：本脚本把 biturbo.def 声明的符号（bt_* + zlib ABI）精确列入
+        // 版本脚本 global 段，其余一律 local 隐藏（libgit2 的 git_* 不外泄）。
+        // `src/ffi/zlib_touch.rs` 中的 `#[used] static ZLIB_ANCHORS` 负责把
+        // zlib 静态库对象拉入链接输入，脚本再把这些符号导出。
+        //
+        // 链接器要求：必须使用 LLVM lld（工具链自带的 rust-lld）。rustc 链接
+        // cdylib 时会注入自己的 anonymous 版本脚本（列出 #[no_mangle] 符号 +
+        // local: *），GNU ld 不允许两个 anonymous 脚本共存（anonymous version
+        // tag cannot be combined with other version tags）；lld 按命令行合并
+        // 两份脚本，且精确符号匹配优先于 `*` 通配，因此本脚本列出的符号全部
+        // 如期导出。x86_64 上 rustc 默认即 rust-lld；aarch64 需在 CI 中显式
+        // 指定（见 .github/workflows/build-windows.yml 的 "Use bundled
+        // rust-lld" 步骤）。
         println!(
             "cargo:rustc-cdylib-link-arg=-Wl,--version-script={}",
             exports_map.display()

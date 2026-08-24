@@ -2,9 +2,11 @@ name: Docs
 
 # Build API documentation with `cargo doc` and publish it to GitHub Pages.
 # docs.rs 默认在 Linux 上构建；本仓库在 Linux 上亦可构建文档（无 Windows 依赖）。
+# 触发策略与 Build 一致：master push 不构建，仅打 v* tag（或手动）时构建。
 on:
   push:
-    branches: [master]
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 permissions:
