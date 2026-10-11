@@ -353,6 +353,7 @@ fn build_commit_storage_native(
 fn build_commit_storage_priority_native(
     repo: &git2::Repository,
     tips: &[BtOid],
+    date_order: bool,
     skip_count: i64,
     max_count: i64,
     cache: &Mutex<HashMap<BtOid, CommitEdges>>,
@@ -369,7 +370,16 @@ fn build_commit_storage_priority_native(
             return false;
         }
     };
-    let _ = walk.set_sorting(git2::Sort::TOPOLOGICAL);
+    // Match git --date-order: order by committer time while keeping every
+    // parent after its children. TOPOLOGICAL alone groups branch histories.
+    let mut sorting = git2::Sort::TOPOLOGICAL;
+    if date_order {
+        sorting |= git2::Sort::TIME;
+    }
+    if let Err(e) = walk.set_sorting(sorting) {
+        set_last_error_str(&format!("failed to set revwalk sorting: {e}"));
+        return false;
+    }
     for &tip in tips {
         let raw_oid = tip.to_bytes();
         if let Ok(git_oid) = git2::Oid::from_bytes(&raw_oid) {
@@ -433,7 +443,8 @@ fn build_commit_storage_priority_native(
 /// - `git_dir_path`：仓库的 `.git` 目录路径（NUL 终止 UTF-8）。
 /// - `tips_ptr` / `tips_len`：起点 tip OID 数组；可为空，此时若提供 `required_oids`
 ///   则以其为 tips。
-/// - `date_order`：非零时按作者时间排序；为零时按拓扑序。
+/// - `date_order`：非零时按提交者时间排序，并保持父提交在子提交之后
+///   （同 `git --date-order`）；为零时按拓扑序。
 /// - `page_size` / `skip_pages` / `min_pages`：分页参数，
 ///   `max_count = page_size * max(1, min_pages)`，`skip_count = page_size * skip_pages`。
 /// - `required_oids_ptr` / `required_oids_len`：必须包含的 OID（启用时忽略分页上限）。
@@ -544,7 +555,10 @@ pub unsafe extern "C" fn bt_get_commits(
     let mut indexes = Vec::new();
     let mut hit_limit = false;
 
-    let success = if combined_tips.len() <= 1 && !has_required {
+    // The single-tip stack walker does not implement date ordering. Route
+    // every date-order request through the time-aware revwalk, including
+    // ForkPlus refreshes that supply HEAD as a required OID.
+    let success = if date_order == 0 && combined_tips.len() <= 1 && !has_required {
         build_commit_storage_native(
             &repo,
             &combined_tips,
@@ -561,6 +575,7 @@ pub unsafe extern "C" fn bt_get_commits(
         build_commit_storage_priority_native(
             &repo,
             &combined_tips,
+            date_order != 0,
             skip_count,
             max_count,
             cache,
