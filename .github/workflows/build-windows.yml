@@ -67,7 +67,6 @@ jobs:
             needs_msvc: false
             release_asset: libbiturbo-arm64.so
           # macOS ARM64 — libbiturbo.dylib（native Apple Silicon runner）
-          # 仅构建 ARM64（Apple Silicon，2020 年后 Mac 主流架构）；不构建 x64
           - os: macos-14
             os_name: macos
             arch: arm64
@@ -76,6 +75,26 @@ jobs:
             archive_prefix: biturbo-macos-arm64
             needs_msvc: false
             release_asset: libbiturbo.dylib
+          # macOS x64（Intel Mac）— libbiturbo-x64.dylib（macos-14 arm64 runner 跨 arch 构建）
+          # Apple 工具链原生支持跨 arch（clang -arch x86_64 / ld64 双 arch 通吃），
+          # 无需 Intel runner。两条原生腿：Rust 侧 rustc 按 target 出 x86_64 代码；
+          # cc 腿（静态 zlib）由 cc crate 按 TARGET 自动加 -arch x86_64；cmake 腿
+          # （vendored libgit2）必须显式指定 CMAKE_OSX_ARCHITECTURES=x86_64（见
+          # 下方 "Cross-arch cmake env" 步骤），否则 cmake 默认按宿主 arm64 编译，
+          # 链接期 Mach-O 架构不匹配直接失败（CI 即红线，不会带病发布）。
+          # tests 在 arm64 runner 上经 Rosetta 2 运行 x86_64 测试二进制（runner
+          # 镜像预装 Rosetta），等价于一次真实的目标架构自检。
+          # Release 裸资产名用 libbiturbo-x64.dylib 与 arm64 的 libbiturbo.dylib
+          # 区分（两个矩阵 job 同时上传同名资产会冲突）；下载方重命名为
+          # libbiturbo.dylib 使用（运行时 DllImport 的库名不变）。
+          - os: macos-14
+            os_name: macos
+            arch: x64
+            target: x86_64-apple-darwin
+            artifact_name: libbiturbo.dylib
+            archive_prefix: biturbo-macos-x64
+            needs_msvc: false
+            release_asset: libbiturbo-x64.dylib
 
     runs-on: ${{ matrix.os }}
 
@@ -120,6 +139,14 @@ jobs:
       - name: Install macOS build deps (cmake)
         if: matrix.os_name == 'macos'
         run: brew install cmake ninja
+
+      - name: Cross-arch cmake env (macOS x64 on arm64 runner)
+        # vendored libgit2 走 cmake crate：cmake 默认按宿主（arm64）编译，与
+        # rustc 产出的 x86_64 cdylib 链接时 Mach-O 架构不匹配。显式指定
+        # CMAKE_OSX_ARCHITECTURES=x86_64 让 cmake 腿跟随目标架构（cc 腿由
+        # cc crate 按 TARGET 自动加 -arch，无需干预）。
+        if: matrix.os_name == 'macos' && matrix.arch == 'x64'
+        run: echo "CMAKE_OSX_ARCHITECTURES=x86_64" >> "$GITHUB_ENV"
 
       - name: Cargo cache
         uses: Swatinem/rust-cache@v2

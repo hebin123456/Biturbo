@@ -1,5 +1,36 @@
 # Release Notes
 
+## v1.1.4
+
+本次发布新增 macOS x64（Intel Mac）平台产物。
+
+### 新增
+
+- **macOS x64 构建**（`x86_64-apple-darwin`）
+  - CI 使用 `macos-14`（Apple Silicon）runner 跨 arch 构建：Apple 工具链原生
+    支持跨架构（clang `-arch x86_64` / ld64 双 arch 通吃），无需 Intel runner。
+  - 三条原生腿的跨 arch 对齐：Rust 侧 rustc 按 target 出 x86_64 代码；cc 腿
+    （静态 zlib）由 cc crate 按 TARGET 自动加 `-arch x86_64`；cmake 腿
+    （vendored libgit2）显式指定 `CMAKE_OSX_ARCHITECTURES=x86_64`（否则 cmake
+    默认按宿主 arm64 编译，链接期 Mach-O 架构不匹配直接失败）。tests 在
+    arm64 runner 上经 Rosetta 2 运行 x86_64 测试二进制，等价于一次真实的
+    目标架构自检。
+  - Release 裸资产名为 `libbiturbo-x64.dylib`（与 ARM64 的 `libbiturbo.dylib`
+    区分，避免两个矩阵 job 上传同名资产冲突），使用时重命名为
+    `libbiturbo.dylib` 即可（运行时按库名 `libbiturbo.dylib` 加载）；归档为
+    `biturbo-macos-x64-1.1.4.zip`。消费方 ForkPlus 的 osx-x64 发布包即依赖
+    本资产（csproj 按 `RuntimeIdentifier == 'osx-x64'` 分流拉取）。
+
+### 平台覆盖
+
+| 平台 | target | runner | 产物 | glibc 基线 |
+|------|--------|--------|------|-----------|
+| Windows x64 | `x86_64-pc-windows-msvc` | `windows-latest` | `biturbo.dll` | — |
+| Linux x64 | `x86_64-unknown-linux-gnu` | `ubuntu-22.04` | `libbiturbo.so` | 2.35 |
+| Linux ARM64 | `aarch64-unknown-linux-gnu` | `ubuntu-22.04-arm` | `libbiturbo-arm64.so` | 2.35 |
+| macOS ARM64 | `aarch64-apple-darwin` | `macos-14` | `libbiturbo.dylib` | — |
+| macOS x64 | `x86_64-apple-darwin` | `macos-14`（跨 arch） | `libbiturbo-x64.dylib` | — |
+
 ## v1.1.3
 
 本次发布新增 Linux ARM64（aarch64）平台产物。

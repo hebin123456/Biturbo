@@ -35,7 +35,7 @@ Tag 详情、Stash 管理、差异解析、语法高亮、Markdown 渲染、矩�
 
 ## 平台支持
 
-支持 **Windows / Linux (x64/ARM64) + macOS (ARM64) 四平台**：
+支持 **Windows / Linux (x64/ARM64) + macOS (ARM64/x64) 五平台**：
 
 | 平台 | target | 产物 | FFI 内存分配器 | 符号导出机制 |
 |------|--------|------|----------------|--------------|
@@ -43,8 +43,11 @@ Tag 详情、Stash 管理、差异解析、语法高亮、Markdown 渲染、矩�
 | Linux x64   | `x86_64-unknown-linux-gnu` | `libbiturbo.so` | libc `malloc` / `free` | ld `--version-script` |
 | Linux ARM64 | `aarch64-unknown-linux-gnu` | `libbiturbo.so`（release 资产 `libbiturbo-arm64.so`） | libc `malloc` / `free` | ld `--version-script` |
 | macOS ARM64 | `aarch64-apple-darwin` | `libbiturbo.dylib` | libc `malloc` / `free` | `-exported_symbols_list` |
+| macOS x64   | `x86_64-apple-darwin` | `libbiturbo.dylib`（release 资产 `libbiturbo-x64.dylib`） | libc `malloc` / `free` | `-exported_symbols_list` |
 
-> macOS 仅构建 ARM64（Apple Silicon，2020 年后 Mac 主流架构），不再提供 x64 产物。
+> macOS x64 在 GitHub Apple Silicon runner（`macos-14`）上跨 arch 构建（Apple
+> 工具链原生支持 `-arch x86_64`，无需 Intel runner），vendored libgit2 的 cmake
+> 腿需显式指定 `CMAKE_OSX_ARCHITECTURES=x86_64`。
 > Linux 同时构建 x64 与 ARM64：ARM64 在 GitHub 原生 ARM64 runner（`ubuntu-22.04-arm`，
 > 公开仓库免费）上原生构建，不做交叉编译。两条 Linux 腿均显式使用工具链自带的
 > rust-lld（见下方"符号导出"与构建说明），规避 GNU ld 的双版本脚本冲突。
@@ -68,17 +71,19 @@ Tag 详情、Stash 管理、差异解析、语法高亮、Markdown 渲染、矩�
 ## 下载
 
 预编译产物可从 [Releases](https://github.com/hebin123456/Biturbo/releases) 页获取。
-每个 Release 附带四平台产物：
+每个 Release 附带五平台产物：
 
 - `biturbo-windows-x64-<version>.zip`   — 含 `biturbo.dll`、`biturbo.def`、`biturbo.dll.lib`
 - `biturbo-linux-x64-<version>.zip`     — 含 `libbiturbo.so`、`biturbo.def`
 - `biturbo-linux-arm64-<version>.zip`   — 含 `libbiturbo-arm64.so`、`biturbo.def`
 - `biturbo-macos-arm64-<version>.zip`   — 含 `libbiturbo.dylib`、`biturbo.def`
+- `biturbo-macos-x64-<version>.zip`     — 含 `libbiturbo-x64.dylib`、`biturbo.def`
 - 单独的动态库 / `.def` 文件
 
 > Linux ARM64 的 Release 裸资产名为 `libbiturbo-arm64.so`（与 x64 的 `libbiturbo.so`
 > 区分以避免同名冲突），使用时重命名为 `libbiturbo.so` 即可（运行时按库名
-> `libbiturbo.so` 加载）。
+> `libbiturbo.so` 加载）。macOS x64 同理：裸资产名 `libbiturbo-x64.dylib`，
+> 使用时重命名为 `libbiturbo.dylib`。
 
 ## 构建
 
@@ -170,7 +175,7 @@ C 侧的 `free` / `delete` 会导致堆损坏——Windows 上 Biturbo 用进程
 
 | 流水线 | 触发条件 | 作用 |
 |--------|----------|------|
-| **Build** | 推送 `v*` tag 或手动触发 | 单条 matrix workflow 同时在 windows / ubuntu(x64+ARM64) / macos runner 上构建、跑测试、校验导出符号、上传 artifact、打 tag 时打包并发布四平台 GitHub Release |
+| **Build** | 推送 `v*` tag 或手动触发 | 单条 matrix workflow 同时在 windows / ubuntu(x64+ARM64) / macos(ARM64+x64 跨 arch) runner 上构建、跑测试、校验导出符号、上传 artifact、打 tag 时打包并发布五平台 GitHub Release |
 | **Bump & Tag** | 手动触发 | 自动 bump 版本（patch/minor/major/prerelease）、改 `Cargo.toml`、打 tag（间接触发 Build） |
 | **Docs** | 推送 `master` 或手动触发 | 在 Linux runner 上跑 `cargo doc` 并部署到 GitHub Pages |
 
